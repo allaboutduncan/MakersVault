@@ -17,6 +17,7 @@ export default function App() {
   const [folderVersion, setFolderVersion] = React.useState(0);
   const [health, setHealth] = React.useState<HealthInfo | null>(null);
   const [tokenTtl, setTokenTtl] = React.useState<number | null>(null);
+  const [sessionExpired, setSessionExpired] = React.useState(false);
   const [theme, setTheme] = React.useState<"light" | "dark">(() => {
     if (typeof window === "undefined") return "light";
     try {
@@ -44,14 +45,17 @@ export default function App() {
     storeToken(tok);
     setToken(tok);
     setTokenTtl(ttl);
+    setSessionExpired(false);
   };
 
   const handleUnauthorized = React.useCallback(() => {
+    if (sessionExpired) return;
     clearToken();
     setToken(null);
     setTokenTtl(null);
+    setSessionExpired(true);
     alert("Your session has expired. Please sign in again.");
-  }, []);
+  }, [sessionExpired]);
 
   const handleFoldersChanged = React.useCallback(() => {
     setFolderVersion(v => v + 1);
@@ -86,7 +90,7 @@ export default function App() {
   if (authRequired && !token) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-200 via-neutral-100 to-white dark:from-neutral-900 dark:via-neutral-950 dark:to-black">
-        <Login onSuccess={handleLogin} apiUp={apiUp} />
+        <Login onSuccess={handleLogin} apiUp={apiUp} theme={theme} />
       </div>
     );
   }
@@ -107,9 +111,9 @@ export default function App() {
         )}
         <header className="flex items-center justify-between mb-4 gap-4 flex-wrap">
           <img
-            src="/img/whitelogo.png"
+            src={theme === "dark" ? "/img/whitelogo.png" : "/img/blacklogo.png"}
             alt="Makers Vault"
-            className="h-32 w-auto max-w-[420px]"
+            className="h-40 w-auto max-w-[520px]"
           />
           <div className="flex flex-wrap items-center gap-3">
             <UploadBar

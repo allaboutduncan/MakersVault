@@ -92,20 +92,41 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
     return Array.from(t).sort((a,b)=>a.localeCompare(b));
   }, [items]);
 
+  const folderById = useMemo(() => {
+    const map: Record<string, Folder> = {};
+    folders.forEach(f => { map[f.id] = f; });
+    return map;
+  }, [folders]);
+
   const folderNames = useMemo(() => {
     const m: Record<string, string> = {};
+    const pathFor = (f: Folder): string => {
+      const parts = [f.name || "Untitled"];
+      let current = f;
+      const guard = new Set<string>([f.id]);
+      while (current.parent_id) {
+        const parent = folderById[current.parent_id];
+        if (!parent || guard.has(parent.id)) break;
+        parts.unshift(parent.name || "Untitled");
+        guard.add(parent.id);
+        current = parent;
+      }
+      return parts.join(" / ");
+    };
     for (const f of folders) {
-      m[f.id] = f.name;
+      m[f.id] = pathFor(f);
     }
     return m;
-  }, [folders]);
+  }, [folders, folderById]);
 
   const folderOptions = useMemo(() => {
     return [
       { id: null as string | null, name: "Unassigned" },
-      ...folders.map(f => ({ id: f.id, name: f.name || "Untitled" })),
+      ...folders
+        .map(f => ({ id: f.id, name: folderNames[f.id] || f.name || "Untitled" }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
     ];
-  }, [folders]);
+  }, [folders, folderNames]);
 
   const sortedItems = useMemo(() => {
     const copy = [...items];

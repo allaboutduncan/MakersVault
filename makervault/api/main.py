@@ -1,101 +1,40 @@
 from fastapi import BackgroundTasks, Depends, FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.cors import CORSMiddleware
-from sqlmodel import SQLModel, Session, create_engine, select, Field
-from pydantic import BaseModel
+from sqlmodel import SQLModel, Session, select
 from typing import List, Optional
 from pathlib import Path
 from PIL import Image
 from zipfile import ZipFile, ZIP_DEFLATED
 import tempfile
-import os, uuid, json, time
-
-import jwt
+import os, json, time, uuid, jwt
 from jwt import PyJWTError
 
-
-DB_URL = os.getenv("DB_URL", "sqlite:///./app.db")
-STORAGE = Path(os.getenv("FILE_STORAGE", "./storage"))
-STORAGE.mkdir(parents=True, exist_ok=True)
-THUMBS = STORAGE / "thumbs"
-THUMBS.mkdir(parents=True, exist_ok=True)
-
-
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
-
-AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "super-secret")
-AUTH_SECRET = os.getenv("AUTH_SECRET", "changeme-secret")
-AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL", "43200"))
-AUTH_ALGO = "HS256"
-AUTH_ENABLED = bool(AUTH_USERNAME and AUTH_PASSWORD)
-auth_scheme = HTTPBearer(auto_error=False)
-
-
-class Folder(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    name: str
-    tags_json: str = Field(default="[]")
-
-
-class Asset(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    filename: str
-    mime: str
-    size: int
-    tags_json: str = Field(default="[]")
-    title: Optional[str] = None
-    notes: Optional[str] = None
-    folder_id: Optional[str] = None
-
-
-class AssetCreate(BaseModel):
-    title: Optional[str] = None
-    notes: Optional[str] = None
-    tags: List[str] = []
-
-
-class AssetOut(BaseModel):
-    id: str
-    filename: str
-    mime: str
-    size: int
-    title: Optional[str]
-    notes: Optional[str]
-    tags: List[str]
-    url: str
-    thumb_url: Optional[str]
-    folder_id: Optional[str]
-
-
-class FolderIn(BaseModel):
-    name: str
-    tags: List[str] = []
-
-
-class FolderOut(BaseModel):
-    id: str
-    name: str
-    tags: List[str]
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class LoginResponse(BaseModel):
-    token: str
-    expires_in: int
-
-
-class DownloadRequest(BaseModel):
-    asset_ids: Optional[List[str]] = None
-    tag: Optional[str] = None
-    folder_id: Optional[str] = None
-    filename: Optional[str] = None
-
+from auth import (
+    AUTH_ENABLED,
+    AUTH_PASSWORD,
+    AUTH_USERNAME,
+    AUTH_TOKEN_TTL,
+    AUTH_SECRET,
+    AUTH_ALGO,
+    create_token,
+    require_auth,
+)
+from db import DB_URL, STORAGE, THUMBS, engine, ensure_folder_parent_column
+from models import Asset, Folder
+from schemas import (
+    AssetCreate,
+    AssetOut,
+    FolderIn,
+    FolderOut,
+    LoginRequest,
+    LoginResponse,
+    DownloadRequest,
+    TagUpdate,
+    AssetMetaUpdate,
+    AssetRename,
+    AssetFolderUpdate,
+)
 
 app = FastAPI(title="MakerVault API")
 
@@ -114,31 +53,37 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     SQLModel.metadata.create_all(engine)
+    ensure_folder_parent_column()
 
 
 # Utilities ------------------------------------------------------
 
 
-def create_token(username: str) -> str:
-    now = int(time.time())
-    payload = {"sub": username, "iat": now, "exp": now + AUTH_TOKEN_TTL}
-    return jwt.encode(payload, AUTH_SECRET, algorithm=AUTH_ALGO)
-
-
-def require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
-    token_param: Optional[str] = Query(default=None, alias="token"),
-):
-    if not AUTH_ENABLED:
+def validate_parent_folder(session: Session, parent_id: Optional[str], folder_id: Optional[str] = None) -> Optional[str]:
+    """Ensure a parent folder exists and does not introduce cycles."""
+    if not parent_id:
         return None
-    token = credentials.credentials if credentials else token_param
-    if not token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        jwt.decode(token, AUTH_SECRET, algorithms=[AUTH_ALGO])
-    except PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return token
+    parent = session.get(Folder, parent_id)
+    if not parent:
+        raise HTTPException(status_code=400, detail="Parent folder not found")
+    if folder_id and parent_id == folder_id:
+        raise HTTPException(status_code=400, detail="Folder cannot be its own parent")
+
+    # Walk ancestors to detect loops
+    ancestor = parent
+    visited = set([folder_id]) if folder_id else set()
+    while ancestor and ancestor.parent_id:
+        if ancestor.parent_id in visited:
+            raise HTTPException(status_code=400, detail="Invalid parent: would create a cycle")
+        if folder_id and ancestor.parent_id == folder_id:
+            raise HTTPException(status_code=400, detail="Invalid parent: would create a cycle")
+        visited.add(ancestor.parent_id)
+        ancestor = session.get(Folder, ancestor.parent_id)
+    return parent_id
+
+
+def folder_to_out(f: Folder) -> "FolderOut":
+    return FolderOut(id=f.id, name=f.name, tags=json.loads(f.tags_json or "[]"), parent_id=f.parent_id)
 
 
 def asset_dir(asset_id: str) -> Path:
@@ -226,13 +171,9 @@ def login(body: LoginRequest):
 
 
 @app.post("/refresh", response_model=LoginResponse)
-def refresh_token(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
-    token_param: Optional[str] = Query(default=None, alias="token"),
-):
+def refresh_token(token: Optional[str] = Depends(require_auth)):
     if not AUTH_ENABLED:
         raise HTTPException(status_code=503, detail="Authentication is not configured on the server")
-    token = credentials.credentials if credentials else token_param
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
@@ -383,23 +324,6 @@ def download_zip(body: DownloadRequest, background: BackgroundTasks, _: Optional
     return zip_assets_response(assets, download_name, background, folder_map)
 
 
-class TagUpdate(BaseModel):
-    tags: List[str]
-
-
-class AssetMetaUpdate(BaseModel):
-    title: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class AssetRename(BaseModel):
-    filename: str
-
-
-class AssetFolderUpdate(BaseModel):
-    folder_id: Optional[str] = None
-
-
 @app.post("/asset/{asset_id}/tags", response_model=AssetOut)
 def set_tags(asset_id: str, body: TagUpdate, _: Optional[str] = Depends(require_auth)):
     with Session(engine) as s:
@@ -491,20 +415,18 @@ def delete_asset(asset_id: str, _: Optional[str] = Depends(require_auth)):
 def list_folders(_: Optional[str] = Depends(require_auth)):
     with Session(engine) as s:
         rows = list(s.exec(select(Folder)))
-    out: List[FolderOut] = []
-    for f in rows:
-        out.append(FolderOut(id=f.id, name=f.name, tags=json.loads(f.tags_json or "[]")))
-    return out
+    return [folder_to_out(f) for f in rows]
 
 
 @app.post("/folders", response_model=FolderOut)
 def create_folder(body: FolderIn, _: Optional[str] = Depends(require_auth)):
-    f = Folder(name=body.name, tags_json=json.dumps(body.tags))
     with Session(engine) as s:
+        parent_id = validate_parent_folder(s, body.parent_id)
+        f = Folder(name=body.name, tags_json=json.dumps(body.tags), parent_id=parent_id)
         s.add(f)
         s.commit()
         s.refresh(f)
-    return FolderOut(id=f.id, name=f.name, tags=body.tags)
+    return folder_to_out(f)
 
 
 @app.patch("/folder/{folder_id}", response_model=FolderOut)
@@ -513,12 +435,14 @@ def update_folder(folder_id: str, body: FolderIn, _: Optional[str] = Depends(req
         f = s.get(Folder, folder_id)
         if not f:
             raise HTTPException(404)
+        parent_id = validate_parent_folder(s, body.parent_id, folder_id)
         f.name = body.name
         f.tags_json = json.dumps(body.tags)
+        f.parent_id = parent_id
         s.add(f)
         s.commit()
         s.refresh(f)
-        return FolderOut(id=f.id, name=f.name, tags=body.tags)
+        return folder_to_out(f)
 
 
 @app.delete("/folder/{folder_id}")
@@ -527,6 +451,14 @@ def delete_folder(folder_id: str, _: Optional[str] = Depends(require_auth)):
         f = s.get(Folder, folder_id)
         if not f:
             raise HTTPException(404)
+        # Detach children to root
+        for child in s.exec(select(Folder).where(Folder.parent_id == folder_id)):
+            child.parent_id = None
+            s.add(child)
+        # Unassign assets in this folder
+        for asset in s.exec(select(Asset).where(Asset.folder_id == folder_id)):
+            asset.folder_id = None
+            s.add(asset)
         s.delete(f)
         s.commit()
     return {"ok": True}

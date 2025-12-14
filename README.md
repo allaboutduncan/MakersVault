@@ -12,6 +12,8 @@ services:
     image: ${API_IMAGE:-shotgunwilly555/makersvault-api:latest}
     restart: unless-stopped
     environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD=${AUTH_PASSWORD:-super-secret}
       - AUTH_SECRET=${AUTH_SECRET:-changeme-secret}
@@ -30,6 +32,10 @@ services:
     restart: unless-stopped
     environment:
       - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
     ports:
       - "5173:5173"
     depends_on:
@@ -60,32 +66,43 @@ docker run -d --name mv-web -p 5173:5173 \
 <h3>Setting up the .env file</h3> <p>Setting up the .env file is important to define your environment variables. This file should be placed in the same folder as the docker-compose.yml file and named <strong>.env</strong>. An example .env file is shown below:</p>
 
 ```yaml
+PUID=1000
+PGID=1000
 API_IMAGE=shotgunwilly555/makersvault-api:latest
 WEB_IMAGE=shotgunwilly555/makersvault-web:latest
 FILE_STORAGE=/app/storage
 DB_URL=sqlite:///./app.db
 CORS_ORIGINS=http://localhost:5173
 VITE_API_URL=http://localhost:8000
+VITE_ALLOWED_HOSTS=localhost
 AUTH_USERNAME=admin
 AUTH_PASSWORD=super-secret
 AUTH_SECRET=replace-with-random-secret
 AUTH_TOKEN_TTL=43200
 ```
 
-<p>If you plan to run the Docker container on anything other than your local machine, you must update the .env file accordingly. For example, if you are running Makers Vault on a Linux server or behind a reverse proxy with a domain name:</p> <p><strong>NOTE:</strong> If you run Makers Vault on anything other than the local machine, you must change <code>CORS_ORIGINS</code> and <code>VITE_API_URL</code> to the appropriate address, or you may receive a “failure to fetch” error when logging in.</p>
+<p>If you plan to run the Docker container on anything other than your local machine, you must update the .env file accordingly. For example, if you are running Makers Vault on a Linux server or behind a reverse proxy with a domain name:</p> <p><strong>NOTE:</strong> If you run Makers Vault on anything other than the local machine, you must change <code>CORS_ORIGINS</code>, <code>VITE_API_URL</code>, and <code>VITE_ALLOWED_HOSTS</code> to the appropriate address, otherwise login requests can fail or the Vite dev server will refuse the connection.</p>
 
 ```yaml
+PUID=1000
+PGID=1000
 API_IMAGE=shotgunwilly555/makersvault-api:latest
 WEB_IMAGE=shotgunwilly555/makersvault-web:latest
 FILE_STORAGE=/app/storage
 DB_URL=sqlite:///./app.db
-CORS_ORIGINS=http://10.0.0.160:5173  # example - use your server's actual IP
-VITE_API_URL=http://10.0.0.160:8000  # or use https://makersvault-local.duckdns.org when behind a proxy
+CORS_ORIGINS=http://10.0.0.160:5173,https://makersvault-local.duckdns.org  # comma separate local + proxy entry points
+VITE_API_URL=https://makersvault-local.duckdns.org  # browser should call the public/proxied URL
+VITE_ALLOWED_HOSTS=10.0.0.160,makersvault-local.duckdns.org  # hostnames only; keep in sync with CORS_ORIGINS
 AUTH_USERNAME=admin
 AUTH_PASSWORD=super-secret
 AUTH_SECRET=replace-with-random-secret  # recommended to use a random generated string
 AUTH_TOKEN_TTL=43200
 ```
+<p><strong>Tip:</strong> <code>CORS_ORIGINS</code> accepts a comma-separated list so you can keep both your direct access URL (e.g. <code>http://10.0.0.160:5173</code>) and reverse proxy domain (e.g. <code>https://makersvault-local.duckdns.org</code>) in one .env file without rewriting it when you switch.</p>
+<p>The Vite dev server now reads <code>VITE_ALLOWED_HOSTS</code> and will fall back to <code>CORS_ORIGINS</code> (plus the hostname from <code>VITE_API_URL</code>) if it is not provided, so host checks stay in sync with the API CORS settings without creating a manual <code>vite.config.js</code> inside the container.</p>
+<p><strong>Running as non-root:</strong> set <code>PUID</code> and <code>PGID</code> to your host user/group IDs (defaults to 1000). The containers create a matching user at startup so volume mounts stay writable and <code>whoami</code> inside the container reports that user instead of root.</p>
+<p><strong>Keeping the API internal:</strong> the web service must remain published for browsers, but the API port only needs to be published when you call it directly. When you front both services with a reverse proxy, remove the <code>ports</code> section from <code>api</code> and add <code>expose: ["8000"]</code> so it is reachable only on the Docker network.</p>
+
 <p>By default, the username and password will be defined in the .env file — it is recommended to change these credentials. All other variables can be modified based on user preference. When mapping ports in the docker-compose file, ensure the ports match the values set in the .env file.</p>
 <h2>Contributing</h2> 
 <p>Contributions are always welcome, whether it be bug fixes or feature improvements. For large changes, please open a discussion first!</p> <h2>Feature Requests and Bug Reporting</h2> <p>For bug reports or feature improvement requests, please open an issue or start a discussion thread.</p> 

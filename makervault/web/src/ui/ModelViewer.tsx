@@ -12,7 +12,7 @@ export default function ModelViewer({ url, ext, assetId }: ModelViewerProps) {
   useEffect(() => {
     let disposed = false;
     let activeObject: THREE.Object3D | null = null;
-    const mount = mountRef.current;
+    const mount = mountRef.current; 
     if (!mount) return;
     setViewError(null);
     const reportError = (message: string) => {
@@ -594,6 +594,7 @@ function findElements(node: Document | Element, localName: string) {
   }
   return [];
 }
+
 
 function findFirstElement(node: Document | Element, localName: string) {
   return findElements(node, localName)[0] ?? null;

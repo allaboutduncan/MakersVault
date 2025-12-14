@@ -40,8 +40,16 @@ function resolveApiBase(): string {
     const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
     return `http://${host}:${port}`.replace(/\/$/, "");
   }
-  // Default: same host, API on 8000
   const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
+  const port = typeof window !== "undefined" ? window.location.port : "";
+  const protocol = typeof window !== "undefined" ? window.location.protocol : "http:";
+  const isStandardPort = port === "" || port === "80" || port === "443";
+  const isLocalHost = host === "localhost" || host === "127.0.0.1";
+  // When served behind a reverse proxy on 80/443, assume the API is on the same origin.
+  if (!isLocalHost && isStandardPort && typeof window !== "undefined") {
+    return `${protocol}//${window.location.host}`.replace(/\/$/, "");
+  }
+  // Default: same host, API on 8000
   return `http://${host}:8000`;
 }
 
@@ -133,7 +141,7 @@ export function fileUrl(rel: string) {
 
 // Folders -------------------------------------------------------
 
-export type Folder = { id: string; name: string; tags: string[] };
+export type Folder = { id: string; name: string; tags: string[]; parent_id?: string | null };
 
 export async function listFolders(): Promise<Folder[]> {
   const res = await fetch(`${API}/folders`, { headers: authHeaders() });
@@ -141,21 +149,21 @@ export async function listFolders(): Promise<Folder[]> {
   return res.json();
 }
 
-export async function createFolder(name: string, tags: string[] = []) {
+export async function createFolder(name: string, tags: string[] = [], parent_id?: string | null) {
   const res = await fetch(`${API}/folders`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name, tags }),
+    body: JSON.stringify({ name, tags, parent_id }),
   });
   assertOk(res, "Create folder failed");
   return res.json();
 }
 
-export async function updateFolder(id: string, name: string, tags: string[]) {
+export async function updateFolder(id: string, name: string, tags: string[], parent_id?: string | null) {
   const res = await fetch(`${API}/folder/${id}`, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name, tags }),
+    body: JSON.stringify({ name, tags, parent_id }),
   });
   assertOk(res, "Update folder failed");
   return res.json();

@@ -4,9 +4,10 @@ import { login } from "../lib/api";
 type Props = {
   onSuccess: (token: string, expires_in: number) => void;
   apiUp: boolean | null;
+  theme: "light" | "dark";
 };
 
-export default function Login({ onSuccess, apiUp }: Props) {
+export default function Login({ onSuccess, apiUp, theme }: Props) {
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [loading, setLoading] = React.useState(false);
@@ -33,8 +34,14 @@ export default function Login({ onSuccess, apiUp }: Props) {
 
   return (
     <div className="w-full max-w-md rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-900/80 p-6 shadow-xl backdrop-blur">
-      <div className="mb-6 text-center space-y-1">
-        <h1 className="text-2xl font-semibold text-neutral-900 dark:text-neutral-100">Makers Vault</h1>
+      <div className="mb-6 text-center space-y-3">
+        <div className="flex justify-center">
+          <img
+            src={theme === "dark" ? "/img/whitelogo.png" : "/img/blacklogo.png"}
+            alt="Makers Vault"
+            className="max-h-40 w-auto"
+          />
+        </div>
         <p className="text-sm text-neutral-600 dark:text-neutral-400">Sign in to continue</p>
       </div>
       {apiUp === false && (
@@ -74,7 +81,7 @@ export default function Login({ onSuccess, apiUp }: Props) {
           disabled={loading}
           className="w-full px-3 py-2 rounded-md bg-emerald-600 text-white font-medium disabled:opacity-60"
         >
-          {loading ? "Signing in…" : "Sign in"}
+          {loading ? "Signing in..." : "Sign in"}
         </button>
       </form>
     </div>
