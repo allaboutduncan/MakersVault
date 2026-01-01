@@ -42,9 +42,14 @@ services:
       - FILE_STORAGE=/app/storage
       - DB_URL=sqlite:////app/data/app.db
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      - IMPORT_MOUNT_PATH=${IMPORT_MOUNT_PATH:-/imports}
+      - IMPORT_MOUNT_EXTS=${IMPORT_MOUNT_EXTS:-stl,3mf,step,stp,obj,svg,png,jpg,jpeg,webp,bmp,zip}
+      - IMPORT_MOUNT_INCLUDE_HIDDEN=${IMPORT_MOUNT_INCLUDE_HIDDEN:-false}
+      - IMPORT_MOUNT_ON_STARTUP=${IMPORT_MOUNT_ON_STARTUP:-true}
     volumes:
       - makersvault_storage:/app/storage
       - makersvault_db:/app/data
+      - ${IMPORT_MOUNT_PATH_HOST:-/path/to/imports}:/imports:ro
     ports:
       - "8000:8000"
 
