@@ -284,10 +284,7 @@ In the future there are plans to add support for more websites, but in this curr
 <h2>Slicer Bridge</h2>
 <p>For the Open in Slicer function to work, a standalone executable will need to be installed (supported for Windows and Linux). The bridge will need to be installed on any standalone machine, with the slicer installed. Example: You host Makers Vault on a Ubuntu Server but utilize the slicer on a Window's Laptop, the slicer bridge will need to be installed only once on the windows Laptop. Makers Vault is then accessed via the web browser from the Windows laptop, Open in Slicer button is clicked and the model is loaded into the Slicer of your choice.</p>
 
-[<h4>The standalone executable can be downloaded here.</h4>](https://github.com/VincentCinque/MakersVault/releases/latest)
-
-	
-<h4>For more infromation on the slicer bridge click here.</h4>
+<a href="https://github.com/VincentCinque/MakersVault/tree/main/makervault/slicer-bridge">The Slicer Bridge can be downloaded here.</a>
 
 <h2>Settings</h2>
 <p>The settings page can be accessed from the settings button at the bottom left of the page. The settings sub-menus encompasses: Open in Slicer settings, themes, and Import settings </p>
