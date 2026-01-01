@@ -3,12 +3,26 @@ import UploadBar from "./UploadBar";
 import AssetGrid from "./AssetGrid";
 import Sidebar from "./Sidebar";
 import Login from "./Login";
-import ThemeToggle from "./ThemeToggle";
+import Settings from "./Settings";
 import { API_BASE, apiHealth, refreshToken, type HealthInfo } from "../lib/api";
 import { clearToken, readToken, storeToken } from "../lib/auth";
-
-const THEME_KEY = "makersvault_theme";
+import { type AppSettings, type ResolvedTheme, loadSettings, resolveTheme, saveSettings } from "../lib/settings";
 const DEFAULT_REFRESH_SECONDS = 6 * 60 * 60; // 6 hours
+
+const logoForTheme = (theme: ResolvedTheme) => {
+  switch (theme) {
+    case "neon":
+      return "/img/green_theme/Neon_Green_bgrm.png";
+    case "purple":
+      return "/img/purple_theme/Neon_Purple_logo_bgrm.png";
+    case "blue":
+      return "/img/blue_theme/Blue_Theme_logo_bgrm.png";
+    case "dark":
+      return "/img/whitelogo.png";
+    default:
+      return "/img/blacklogo.png";
+  }
+};
 
 export default function App() {
   const [token, setToken] = React.useState<string | null>(() => readToken());
@@ -18,26 +32,29 @@ export default function App() {
   const [health, setHealth] = React.useState<HealthInfo | null>(null);
   const [tokenTtl, setTokenTtl] = React.useState<number | null>(null);
   const [sessionExpired, setSessionExpired] = React.useState(false);
-  const [theme, setTheme] = React.useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    try {
-      const stored = window.localStorage.getItem(THEME_KEY) as "light" | "dark" | null;
-      if (stored === "light" || stored === "dark") return stored;
-    } catch {
-      // ignore storage errors
-    }
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  });
+  const [activeView, setActiveView] = React.useState<"library" | "settings">("library");
+  const [settings, setSettings] = React.useState<AppSettings>(() => loadSettings());
+  const resolvedTheme = React.useMemo(
+    () => resolveTheme(settings.theme.selected),
+    [settings.theme.selected]
+  );
   React.useEffect(() => {
     if (typeof document === "undefined") return;
-    try {
-      window.localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      // ignore storage errors
-    }
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+    const root = document.documentElement;
+    const isDark =
+      resolvedTheme === "dark" ||
+      resolvedTheme === "neon" ||
+      resolvedTheme === "purple" ||
+      resolvedTheme === "blue";
+    root.classList.toggle("dark", isDark);
+    root.classList.toggle("theme-neon", resolvedTheme === "neon");
+    root.classList.toggle("theme-purple", resolvedTheme === "purple");
+    root.classList.toggle("theme-blue", resolvedTheme === "blue");
+  }, [resolvedTheme]);
   React.useEffect(() => { (async ()=> setHealth(await apiHealth()))(); }, []);
+  React.useEffect(() => {
+    saveSettings(settings);
+  }, [settings]);
   const apiUp = health?.ok ?? null;
   const authRequired = health?.auth_required ?? true;
 
@@ -59,6 +76,15 @@ export default function App() {
 
   const handleFoldersChanged = React.useCallback(() => {
     setFolderVersion(v => v + 1);
+  }, []);
+
+  const handleAssetsChanged = React.useCallback(() => {
+    setNonce(n => n + 1);
+  }, []);
+
+  const handleSelectFolder = React.useCallback((id: string | null) => {
+    setFolderId(id);
+    setActiveView("library");
   }, []);
 
   const handleLogout = () => {
@@ -89,8 +115,8 @@ export default function App() {
 
   if (authRequired && !token) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-200 via-neutral-100 to-white dark:from-neutral-900 dark:via-neutral-950 dark:to-black">
-        <Login onSuccess={handleLogin} apiUp={apiUp} theme={theme} />
+      <div className="min-h-screen flex items-center justify-center">
+        <Login onSuccess={handleLogin} apiUp={apiUp} theme={resolvedTheme} />
       </div>
     );
   }
@@ -99,9 +125,12 @@ export default function App() {
     <div className="h-screen flex">
       <Sidebar
         selectedId={folderId}
-        onSelect={setFolderId}
+        onSelect={handleSelectFolder}
         onFoldersChanged={handleFoldersChanged}
+        onAssetsChanged={handleAssetsChanged}
         onUnauthorized={handleUnauthorized}
+        onOpenSettings={() => setActiveView("settings")}
+        activeView={activeView}
       />
       <main className="flex-1 p-4 overflow-auto">
         {apiUp === false && (
@@ -110,36 +139,57 @@ export default function App() {
           </div>
         )}
         <header className="flex items-center justify-between mb-4 gap-4 flex-wrap">
-          <img
-            src={theme === "dark" ? "/img/whitelogo.png" : "/img/blacklogo.png"}
-            alt="Makers Vault"
-            className="h-40 w-auto max-w-[520px]"
-          />
-          <div className="flex flex-wrap items-center gap-3">
-            <UploadBar
-              folderId={folderId}
-              onUploaded={() => setNonce(n => n + 1)}
-              onUnauthorized={handleUnauthorized}
+          {activeView === "library" && (
+            <img
+              src={logoForTheme(resolvedTheme)}
+              alt="Makers Vault"
+              className="h-40 w-auto max-w-[520px]"
             />
-            <ThemeToggle value={theme} onToggle={() => setTheme(prev => (prev === "light" ? "dark" : "light"))} />
+          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {activeView === "library" ? (
+              <UploadBar
+                folderId={folderId}
+                makerworldCookie={settings.makerworld.cookie}
+                thingiverseCookie={settings.thingiverse.cookie}
+                onUploaded={handleAssetsChanged}
+                onUnauthorized={handleUnauthorized}
+              />
+            ) : (
+              <button
+                className="px-3 py-2 rounded-md border border-panel-strong text-sm"
+                onClick={() => setActiveView("library")}
+              >
+                Back to library
+              </button>
+            )}
             <button
               onClick={() => {
                 if (confirm("Are you sure you want to log out?")) {
                   handleLogout();
                 }
               }}
-              className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 text-sm"
+              className="px-3 py-2 rounded-md border border-panel-strong text-sm"
             >
               Log out
             </button>
           </div>
         </header>
-        <AssetGrid
-          key={`${nonce + (folderId||'')}-${folderVersion}`}
-          folderId={folderId}
-          foldersVersion={folderVersion}
-          onUnauthorized={handleUnauthorized}
-        />
+        {activeView === "library" ? (
+          <AssetGrid
+            key={`${nonce + (folderId||'')}-${folderVersion}`}
+            folderId={folderId}
+            foldersVersion={folderVersion}
+            onUnauthorized={handleUnauthorized}
+            slicerSettings={settings.slicer}
+            theme={resolvedTheme}
+          />
+        ) : (
+          <Settings
+            settings={settings}
+            onChange={setSettings}
+          />
+        )}
       </main>
     </div>
   );

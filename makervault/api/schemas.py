@@ -8,6 +8,41 @@ class AssetCreate(BaseModel):
   tags: List[str] = []
 
 
+class ImportRequest(BaseModel):
+  url: str
+  title: Optional[str] = None
+  notes: Optional[str] = None
+  tags: List[str] = []
+  folder_id: Optional[str] = None
+  filename: Optional[str] = None
+  makerworld_cookie: Optional[str] = None
+  thingiverse_cookie: Optional[str] = None
+
+
+class ImportInspectOut(BaseModel):
+  filename: str
+  mime: str
+  is_zip: bool
+
+
+class ZipEntryOut(BaseModel):
+  path: str
+  size: int
+
+
+class ImportZipEntriesRequest(ImportRequest):
+  pass
+
+
+class ImportZipEntriesOut(BaseModel):
+  filename: str
+  entries: List[ZipEntryOut]
+
+
+class ImportZipExtractRequest(ImportRequest):
+  entries: List[str]
+
+
 class AssetOut(BaseModel):
   id: str
   filename: str
@@ -19,6 +54,11 @@ class AssetOut(BaseModel):
   url: str
   thumb_url: Optional[str]
   folder_id: Optional[str]
+
+
+class ImportZipResult(BaseModel):
+  assets: List[AssetOut]
+  failed: List[str] = []
 
 
 class FolderIn(BaseModel):

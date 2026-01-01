@@ -19,3 +19,4 @@ class Asset(SQLModel, table=True):
   title: Optional[str] = None
   notes: Optional[str] = None
   folder_id: Optional[str] = None
+  source_path: Optional[str] = None

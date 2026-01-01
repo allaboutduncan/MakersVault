@@ -16,6 +16,26 @@ function assertOk(res: Response, message: string) {
   }
 }
 
+async function readErrorMessage(res: Response, fallback: string) {
+  let body = "";
+  try {
+    body = await res.text();
+  } catch {
+    return fallback;
+  }
+  const trimmed = body.trim();
+  if (!trimmed) return fallback;
+  try {
+    const data = JSON.parse(trimmed);
+    if (typeof data?.detail === "string" && data.detail.trim()) {
+      return data.detail.trim();
+    }
+  } catch {
+    // ignore JSON parse errors
+  }
+  return trimmed;
+}
+
 export type Asset = {
   id: string;
   filename: string;
@@ -27,6 +47,22 @@ export type Asset = {
   url: string; // relative to API host
   thumb_url?: string | null; // relative to API host
   folder_id?: string | null;
+};
+
+export type ImportInspectInfo = {
+  filename: string;
+  mime: string;
+  is_zip: boolean;
+};
+
+export type ZipEntryInfo = {
+  path: string;
+  size: number;
+};
+
+export type ImportZipResult = {
+  assets: Asset[];
+  failed: string[];
 };
 
 // API base URL resolution (browser-reachable)
@@ -83,7 +119,120 @@ export async function uploadAsset(
     body: fd,
     headers: authHeaders(),
   });
-  assertOk(res, "Upload failed");
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    const message = await readErrorMessage(res, "Upload failed");
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function importFromLink(payload: {
+  url: string;
+  title?: string;
+  notes?: string;
+  tags?: string[];
+  folder_id?: string;
+  filename?: string;
+  makerworld_cookie?: string;
+  thingiverse_cookie?: string;
+}) {
+  const res = await fetch(`${API}/import`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let message = "Import failed";
+    try {
+      const data = await res.json();
+      if (typeof data?.detail === "string") message = data.detail;
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function inspectImportLink(payload: {
+  url: string;
+  title?: string;
+  notes?: string;
+  tags?: string[];
+  folder_id?: string;
+  filename?: string;
+  makerworld_cookie?: string;
+  thingiverse_cookie?: string;
+}): Promise<ImportInspectInfo> {
+  const res = await fetch(`${API}/import/inspect`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    const message = await readErrorMessage(res, "Inspect failed");
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function listImportZipEntries(payload: {
+  url: string;
+  title?: string;
+  notes?: string;
+  tags?: string[];
+  folder_id?: string;
+  filename?: string;
+  makerworld_cookie?: string;
+  thingiverse_cookie?: string;
+}): Promise<{ filename: string; entries: ZipEntryInfo[] }> {
+  const res = await fetch(`${API}/import/zip/entries`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    const message = await readErrorMessage(res, "Zip listing failed");
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function importZipFromLink(payload: {
+  url: string;
+  entries: string[];
+  title?: string;
+  notes?: string;
+  tags?: string[];
+  folder_id?: string;
+  filename?: string;
+  makerworld_cookie?: string;
+  thingiverse_cookie?: string;
+}): Promise<ImportZipResult> {
+  const res = await fetch(`${API}/import/zip`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    const message = await readErrorMessage(res, "Zip import failed");
+    throw new Error(message);
+  }
   return res.json();
 }
 

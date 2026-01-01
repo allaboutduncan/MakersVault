@@ -1,11 +1,80 @@
 import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import occtWasmUrl from "occt-import-js/dist/occt-import-js.wasm?url";
 import occtWorkerUrl from "occt-import-js/dist/occt-import-js-worker.js?url";
+import { ResolvedTheme } from "../lib/settings";
 
-type ModelViewerProps = { url: string; ext: string; assetId?: string };
+type ModelViewerProps = { url: string; ext: string; assetId?: string; theme: ResolvedTheme };
 
-export default function ModelViewer({ url, ext, assetId }: ModelViewerProps) {
+type ModelPalette = {
+  color: THREE.Color;
+  emissive: THREE.Color;
+  emissiveIntensity: number;
+  metalness: number;
+  roughness: number;
+};
+
+function readCssColorVar(name: string, fallback: string) {
+  if (typeof window === "undefined") return new THREE.Color(fallback);
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return new THREE.Color(value || fallback);
+}
+
+function paletteForTheme(theme: ResolvedTheme): ModelPalette {
+  const fallback =
+    theme === "neon"
+      ? "#b6ff2b"
+      : theme === "purple"
+        ? "#c77dff"
+        : theme === "blue"
+          ? "#74d4ff"
+          : theme === "dark"
+            ? "#e2e8f0"
+            : "#cbd5e1";
+  const emissiveFallback =
+    theme === "neon"
+      ? "#3a7a1a"
+      : theme === "purple"
+        ? "#6a2da8"
+        : theme === "blue"
+          ? "#1f5c9a"
+          : theme === "dark"
+            ? "#475569"
+            : "#94a3b8";
+  return {
+    color: readCssColorVar("--mv-model-color", fallback),
+    emissive: readCssColorVar("--mv-model-emissive", emissiveFallback),
+    emissiveIntensity:
+      theme === "neon" || theme === "purple" || theme === "blue"
+        ? 0.35
+        : theme === "dark"
+          ? 0.08
+          : 0.05,
+    metalness: 0.2,
+    roughness: theme === "neon" || theme === "purple" || theme === "blue" ? 0.6 : 0.8,
+  };
+}
+
+function applyThemeToObject(obj: THREE.Object3D, palette: ModelPalette) {
+  obj.traverse(child => {
+    if (!(child instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach(mat => {
+      const typed = mat as THREE.MeshStandardMaterial;
+      if (typed.color) typed.color.copy(palette.color);
+      if (typed.emissive) {
+        typed.emissive.copy(palette.emissive);
+        typed.emissiveIntensity = palette.emissiveIntensity;
+      }
+      if (typeof typed.metalness === "number") typed.metalness = palette.metalness;
+      if (typeof typed.roughness === "number") typed.roughness = palette.roughness;
+      mat.needsUpdate = true;
+    });
+  });
+}
+
+export default function ModelViewer({ url, ext, assetId, theme }: ModelViewerProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [viewError, setViewError] = useState<string | null>(null);
 
@@ -14,6 +83,7 @@ export default function ModelViewer({ url, ext, assetId }: ModelViewerProps) {
     let activeObject: THREE.Object3D | null = null;
     const mount = mountRef.current; 
     if (!mount) return;
+    const palette = paletteForTheme(theme);
     setViewError(null);
     const reportError = (message: string) => {
       if (!disposed) {
@@ -104,6 +174,7 @@ export default function ModelViewer({ url, ext, assetId }: ModelViewerProps) {
             disposeObject3D(obj);
             return;
           }
+          applyThemeToObject(obj, palette);
           activeObject = obj;
           scene.add(obj);
           const box = new THREE.Box3().setFromObject(obj);
@@ -155,15 +226,15 @@ export default function ModelViewer({ url, ext, assetId }: ModelViewerProps) {
     } catch {}
     renderer.dispose();
   };
-}, [url, ext, assetId]);
+}, [url, ext, assetId, theme]);
 
   return (
     <div
       ref={mountRef}
-      className="w-full h-full bg-neutral-100 dark:bg-neutral-900 rounded-md overflow-hidden relative"
+      className="w-full h-full bg-panel-soft rounded-md overflow-hidden relative"
     >
       {viewError && (
-        <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-sm font-medium text-red-700 dark:text-red-300 bg-white/90 dark:bg-black/70">
+        <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-sm font-medium text-red-700 dark:text-red-300 bg-panel-overlay">
           {viewError}
         </div>
       )}
@@ -205,14 +276,14 @@ async function acquireSnapshotRenderer() {
   return { renderer, release: unlock };
 }
 
-export function ModelSnapshot({ url, ext, assetId }: ModelViewerProps) {
+export function ModelSnapshot({ url, ext, assetId, theme }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [state, setState] = useState<SnapshotState>("idle");
 
   useEffect(() => {
     let disposed = false;
-    const cacheKey = assetId ? `asset:${assetId}` : `${url}`;
+    const cacheKey = assetId ? `asset:${assetId}:${theme}` : `${url}:${theme}`;
     if (snapshotCache.has(cacheKey)) {
       setSnapshot(snapshotCache.get(cacheKey)!);
       return;
@@ -224,7 +295,7 @@ export function ModelSnapshot({ url, ext, assetId }: ModelViewerProps) {
         const rect = containerRef.current.getBoundingClientRect();
         const width = Math.max(120, Math.floor(rect.width || 240));
         const height = Math.max(120, Math.floor(rect.height || 180));
-        const image = await generateModelSnapshot(url, ext, width, height);
+        const image = await generateModelSnapshot(url, ext, width, height, theme);
         if (disposed) return;
         snapshotCache.set(cacheKey, image);
         setSnapshot(image);
@@ -240,19 +311,19 @@ export function ModelSnapshot({ url, ext, assetId }: ModelViewerProps) {
     return () => {
       disposed = true;
     };
-  }, [url, ext, assetId]);
+  }, [url, ext, assetId, theme]);
 
   return (
     <div
       ref={containerRef}
-      className="w-full h-full bg-neutral-100 dark:bg-neutral-900 flex items-center justify-center rounded-md overflow-hidden"
+      className="w-full h-full bg-panel-soft flex items-center justify-center rounded-md overflow-hidden"
     >
       {snapshot ? (
         <img src={snapshot} alt="Preview" className="w-full h-full object-cover" />
       ) : state === "loading" ? (
-        <span className="text-xs text-neutral-500 dark:text-neutral-400">Generating preview…</span>
+        <span className="text-xs text-muted">Generating preview...</span>
       ) : (
-        <span className="text-xs text-neutral-500 dark:text-neutral-400">Preview unavailable</span>
+        <span className="text-xs text-muted">Preview unavailable</span>
       )}
     </div>
   );
@@ -600,12 +671,19 @@ function findFirstElement(node: Document | Element, localName: string) {
   return findElements(node, localName)[0] ?? null;
 }
 
-async function generateModelSnapshot(url: string, ext: string, width: number, height: number) {
+async function generateModelSnapshot(
+  url: string,
+  ext: string,
+  width: number,
+  height: number,
+  theme: ResolvedTheme
+) {
   const normalized = (ext || "").toLowerCase();
   const object = await loadObjectFromAsset(normalized, url);
   if (!object) {
     throw new Error(`Unsupported snapshot extension: ${ext}`);
   }
+  applyThemeToObject(object, paletteForTheme(theme));
   const scene = new THREE.Scene();
   scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
   scene.add(new THREE.AmbientLight(0xffffff, 0.8));

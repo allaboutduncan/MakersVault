@@ -1,15 +1,31 @@
 import React, { useEffect, useState } from "react";
 import { Folder, UnauthorizedError, createFolder, deleteFolder, downloadFolderZip, listFolders, updateFolder } from "../lib/api";
+import { entriesFromDataTransfer, uploadEntriesToFolder } from "../lib/uploadTree";
+import { buildUploadEntriesFromZip, isZipFile, readZipEntries } from "../lib/zipUtils";
 import TagInput from "./TagInput";
+import { useZipImportPrompt } from "./ZipImportModal";
 
 type Props = {
   selectedId?: string | null;
   onSelect: (id: string | null) => void;
   onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
+  onOpenSettings?: () => void;
+  activeView?: "library" | "settings";
+  onAssetsChanged?: () => void;
 };
 
-export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnauthorized }: Props) {
+const DROP_ALL_ID = "__all";
+
+export default function Sidebar({
+  selectedId,
+  onSelect,
+  onFoldersChanged,
+  onUnauthorized,
+  onOpenSettings,
+  activeView = "library",
+  onAssetsChanged,
+}: Props) {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -20,6 +36,123 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
   const [editName, setEditName] = useState("");
   const [editTags, setEditTags] = useState<string[]>([]);
   const [editParent, setEditParent] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [dropUploading, setDropUploading] = useState(false);
+  const zipPrompt = useZipImportPrompt();
+
+  const uploadWithZipPrompt = async (entries: Awaited<ReturnType<typeof entriesFromDataTransfer>>, folderId: string | null) => {
+    const normalEntries = entries.filter(entry => !isZipFile(entry.file.name));
+    const zipEntries = entries.filter(entry => isZipFile(entry.file.name));
+    let uploaded = 0;
+    const failed: string[] = [];
+    const applyResult = (result: { uploaded: number; failed: string[] }) => {
+      uploaded += result.uploaded;
+      failed.push(...result.failed);
+    };
+    if (normalEntries.length) {
+      const result = await uploadEntriesToFolder(normalEntries, folderId, onUnauthorized);
+      applyResult(result);
+    }
+    for (const entry of zipEntries) {
+      let zipData: Record<string, Uint8Array> | null = null;
+      const baseParts = entry.relativePath.split("/").filter(Boolean);
+      baseParts.pop();
+      const basePath = baseParts.join("/");
+      await zipPrompt.prompt({
+        label: entry.file.name,
+        onImportAsZip: async () => {
+          const result = await uploadEntriesToFolder([entry], folderId, onUnauthorized);
+          applyResult(result);
+        },
+        loadEntries: async () => {
+          const result = await readZipEntries(entry.file);
+          zipData = result.data;
+          return result.entries;
+        },
+        onImportSelected: async (selectedPaths: string[]) => {
+          if (!zipData) {
+            const result = await readZipEntries(entry.file);
+            zipData = result.data;
+          }
+          const unzipEntries = buildUploadEntriesFromZip(zipData || {}, selectedPaths, basePath);
+          const result = await uploadEntriesToFolder(unzipEntries, folderId, onUnauthorized);
+          applyResult(result);
+        },
+      });
+    }
+    if (uploaded) {
+      onAssetsChanged?.();
+    }
+    if (failed.length) {
+      alert(`Failed to upload: ${failed.join(", ")}`);
+    }
+  };
+
+  const isFileDrag = (e: React.DragEvent<HTMLElement>) => {
+    const types = Array.from(e.dataTransfer?.types || []);
+    return types.includes("Files");
+  };
+
+  const handleDragOverTarget = (targetId: string) => (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!dropUploading) {
+      setDropTargetId(targetId);
+    }
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDropFiles = (folderId: string | null) => async (
+    e: React.DragEvent<HTMLElement>
+  ) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dropUploading) return;
+    setDropTargetId(null);
+    setDropUploading(true);
+    const entries = await entriesFromDataTransfer(e.dataTransfer);
+    if (!entries.length) {
+      setDropUploading(false);
+      return;
+    }
+    await uploadWithZipPrompt(entries, folderId);
+    setDropUploading(false);
+  };
+
+  const handleSidebarDragOver = (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+  };
+
+  const handleSidebarDragLeave = (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e)) return;
+    if (e.currentTarget !== e.target) return;
+    e.preventDefault();
+    setDropTargetId(null);
+  };
+
+  const handleSidebarDrop = (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dropUploading) return;
+    const targetFolderId =
+      dropTargetId === DROP_ALL_ID ? null : dropTargetId;
+    setDropTargetId(null);
+    if (!targetFolderId && dropTargetId !== DROP_ALL_ID) return;
+    setDropUploading(true);
+    void (async () => {
+      const entries = await entriesFromDataTransfer(e.dataTransfer);
+      if (!entries.length) {
+        setDropUploading(false);
+        return;
+      }
+      await uploadWithZipPrompt(entries, targetFolderId);
+      setDropUploading(false);
+    })();
+  };
 
   const filenameFromDisposition = (res: Response, fallback: string) => {
     const dispo = res.headers.get("content-disposition") || "";
@@ -215,20 +348,32 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
     });
   };
 
+  const closeFolderMenu = (e: React.MouseEvent<HTMLElement>) => {
+    const details = e.currentTarget.closest("details") as HTMLDetailsElement | null;
+    if (details?.open) {
+      details.open = false;
+    }
+  };
+
   const renderFolderNode = (folder: Folder, depth = 0) => {
     const children = childrenMap[folder.id] || [];
     const isSelected = selectedId === folder.id;
     const isOpen = expanded.has(folder.id);
+    const isDropTarget = dropTargetId === folder.id;
     return (
       <div key={folder.id} className="rounded-md">
         <div
-          className={`flex items-center gap-2 px-2 py-1 ${isSelected ? "bg-emerald-50 dark:bg-neutral-800" : ""}`}
+          className={`flex items-center gap-2 w-full rounded-md px-2 py-2 min-h-[38px] ${
+            isSelected ? "bg-accent-soft" : ""
+          } ${isDropTarget ? "ring-2 ring-[color:var(--mv-accent)] ring-offset-1 ring-offset-[color:var(--mv-panel-strong)]" : ""}`}
           style={{ paddingLeft: 8 + depth * 12 }}
+          onDragOver={handleDragOverTarget(folder.id)}
+          onDrop={handleDropFiles(folder.id)}
         >
           {children.length ? (
             <button
               onClick={() => toggleExpand(folder.id)}
-              className="text-xs w-5 h-5 flex items-center justify-center rounded border border-transparent hover:border-neutral-400 dark:hover:border-neutral-600"
+              className="text-xs w-5 h-5 flex items-center justify-center rounded border border-transparent hover:border-panel-strong"
               aria-label={isOpen ? "Collapse" : "Expand"}
             >
               {isOpen ? "▾" : "▸"}
@@ -242,35 +387,35 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
           </button>
           <div className="relative">
             <details className="group">
-              <summary className="list-none w-8 h-8 rounded-md border flex items-center justify-center text-xs cursor-pointer select-none">
+              <summary className="list-none w-8 h-8 rounded-md border border-panel-strong flex items-center justify-center text-xs cursor-pointer select-none">
                 ⋯
               </summary>
-              <div className="absolute right-0 mt-1 min-w-[140px] rounded-md border bg-white dark:bg-neutral-900 shadow-lg z-10">
+              <div className="absolute right-0 mt-1 min-w-[140px] rounded-md border border-panel bg-panel-strong shadow-lg z-10">
                 <button
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-panel-soft disabled:opacity-60"
                   disabled={busy}
-                  onClick={() => startCreate(folder.id)}
+                  onClick={(e) => { closeFolderMenu(e); startCreate(folder.id); }}
                 >
                   + Subfolder
                 </button>
                 <button
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-panel-soft disabled:opacity-60"
                   disabled={busy}
-                  onClick={() => startEdit(folder)}
+                  onClick={(e) => { closeFolderMenu(e); startEdit(folder); }}
                 >
                   Edit
                 </button>
                 <button
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-panel-soft disabled:opacity-60"
                   disabled={busy}
-                  onClick={() => downloadFolder(folder)}
+                  onClick={(e) => { closeFolderMenu(e); downloadFolder(folder); }}
                 >
                   Zip download
                 </button>
                 <button
                   className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/40 disabled:opacity-60"
                   disabled={busy}
-                  onClick={() => remove(folder.id)}
+                  onClick={(e) => { closeFolderMenu(e); remove(folder.id); }}
                 >
                   Delete
                 </button>
@@ -284,15 +429,24 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
   };
 
   return (
-    <aside className="w-64 border-r border-neutral-200 dark:border-neutral-800 p-3 flex flex-col gap-3">
+    <aside
+      className="w-64 border-r border-panel p-3 flex flex-col gap-3"
+      onDragOver={handleSidebarDragOver}
+      onDragLeave={handleSidebarDragLeave}
+      onDrop={handleSidebarDrop}
+    >
       <div className="flex items-center justify-between">
-        <div className="text-xs text-neutral-500">Location Manager</div>
-        <button className="text-sm px-2 py-1 rounded-md border" onClick={() => startCreate(null)}>New</button>
+        <div className="text-xs text-muted">Location Manager</div>
+        <button className="text-sm px-2 py-1 rounded-md border border-panel-strong" onClick={() => startCreate(null)}>New</button>
       </div>
 
       <button
-        className={`flex items-center gap-2 px-2 py-1 rounded-md ${!selectedId ? 'bg-emerald-50 dark:bg-neutral-800' : ''}`}
+        className={`flex items-center gap-2 px-2 py-1 rounded-md border border-transparent ${
+          !selectedId ? "bg-accent-soft" : ""
+        } ${dropTargetId === DROP_ALL_ID ? "border-accent ring-2 ring-[color:var(--mv-accent)] ring-offset-1 ring-offset-[color:var(--mv-panel-strong)]" : ""}`}
         onClick={() => onSelect(null)}
+        onDragOver={handleDragOverTarget(DROP_ALL_ID)}
+        onDrop={handleDropFiles(null)}
       >
         <span>All Items</span>
       </button>
@@ -308,20 +462,20 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
             value={newName}
             onChange={e=>setNewName(e.target.value)}
             placeholder="Folder name"
-            className="px-2 py-1 text-sm rounded-md border w-full bg-white text-neutral-900 dark:bg-neutral-900 dark:text-white"
+            className="px-2 py-1 text-sm rounded-md border border-panel-strong w-full bg-panel-strong text-foreground"
           />
           <select
             value={newParent || ""}
             onChange={e => setNewParent(e.target.value || null)}
-            className="px-2 py-1 text-sm rounded-md border w-full bg-white text-neutral-900 dark:bg-neutral-900 dark:text-white"
+            className="px-2 py-1 text-sm rounded-md border border-panel-strong w-full bg-panel-strong text-foreground"
           >
             {folderOptions.map(opt => (
               <option key={opt.id ?? "root"} value={opt.id || ""}>{opt.name}</option>
             ))}
           </select>
           <div className="flex gap-2">
-            <button disabled={busy} className="text-sm px-3 py-1 rounded-md bg-emerald-600 text-white flex-1" onClick={create}>Create</button>
-            <button className="text-sm px-3 py-1 rounded-md border flex-1" onClick={()=>{ setCreating(false); setNewParent(null); }}>Cancel</button>
+            <button disabled={busy} className="text-sm px-3 py-1 rounded-md bg-accent flex-1" onClick={create}>Create</button>
+            <button className="text-sm px-3 py-1 rounded-md border border-panel-strong flex-1" onClick={()=>{ setCreating(false); setNewParent(null); }}>Cancel</button>
           </div>
         </div>
       )}
@@ -331,12 +485,12 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
           <input
             value={editName}
             onChange={e=>setEditName(e.target.value)}
-            className="px-2 py-1 text-sm rounded-md border bg-white text-neutral-900 dark:bg-neutral-900 dark:text-white"
+            className="px-2 py-1 text-sm rounded-md border border-panel-strong bg-panel-strong text-foreground"
           />
           <select
             value={editParent || ""}
             onChange={e => setEditParent(e.target.value || null)}
-            className="px-2 py-1 text-sm rounded-md border bg-white text-neutral-900 dark:bg-neutral-900 dark:text-white"
+            className="px-2 py-1 text-sm rounded-md border border-panel-strong bg-panel-strong text-foreground"
           >
             {folderOptions
               .filter(opt => !editing || (opt.id !== editing && !(opt.id && isDescendant(opt.id, editing))))
@@ -346,11 +500,46 @@ export default function Sidebar({ selectedId, onSelect, onFoldersChanged, onUnau
           </select>
           <TagInput value={editTags} onChange={setEditTags} placeholder="Add folder tags" />
           <div className="flex items-center gap-2">
-            <button disabled={busy} className="text-sm px-2 py-1 rounded-md bg-emerald-600 text-white" onClick={saveEdit}>Save</button>
-            <button className="text-sm px-2 py-1 rounded-md border" onClick={()=>{ setEditing(null); setEditTags([]); setEditParent(null); }}>Cancel</button>
+            <button disabled={busy} className="text-sm px-2 py-1 rounded-md bg-accent" onClick={saveEdit}>Save</button>
+            <button className="text-sm px-2 py-1 rounded-md border border-panel-strong" onClick={()=>{ setEditing(null); setEditTags([]); setEditParent(null); }}>Cancel</button>
           </div>
         </div>
       )}
+
+      <div className="mt-auto pt-2 border-t border-panel">
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className={`w-full flex items-center gap-2 px-2 py-2 rounded-md border ${
+            activeView === "settings"
+              ? "bg-accent-soft border-accent-soft"
+              : "border-panel-strong hover:bg-panel-soft"
+          }`}
+          aria-label="Settings"
+        >
+          <GearIcon className="w-4 h-4" />
+          <span className="text-sm">Settings</span>
+        </button>
+      </div>
+      {zipPrompt.modal}
     </aside>
+  );
+}
+
+function GearIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.54V21a2 2 0 0 1-4 0v-.08a1.7 1.7 0 0 0-1-1.54 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.54-1H3a2 2 0 0 1 0-4h.08a1.7 1.7 0 0 0 1.54-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34 1.7 1.7 0 0 0 1-1.54V3a2 2 0 0 1 4 0v.08a1.7 1.7 0 0 0 1 1.54 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87 1.7 1.7 0 0 0 1.54 1H21a2 2 0 0 1 0 4h-.08a1.7 1.7 0 0 0-1.54 1z" />
+    </svg>
   );
 }

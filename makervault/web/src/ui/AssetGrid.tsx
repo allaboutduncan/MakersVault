@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Asset,
   Folder,
@@ -17,18 +17,30 @@ import ModelViewer, { ModelSnapshot } from "./ModelViewer";
 import TagBadge from "./TagBadge";
 import TagInput from "./TagInput";
 import { colorForTag } from "./tagColors";
+import { ResolvedTheme, SlicerSettings, slicerLabelFor } from "../lib/settings";
+import { entriesFromDataTransfer, uploadEntriesToFolder } from "../lib/uploadTree";
+import { buildUploadEntriesFromZip, isZipFile, readZipEntries } from "../lib/zipUtils";
+import { useZipImportPrompt } from "./ZipImportModal";
 
 function extOf(name: string) {
   const m = /\.([^.]+)$/.exec(name);
   return (m?.[1] || "").toLowerCase();
 }
 
-type Props = { folderId?: string | null; foldersVersion?: number; onUnauthorized?: () => void };
+const MODEL_EXTS = new Set(["stl", "3mf", "step", "stp", "obj"]);
+
+type Props = {
+  folderId?: string | null;
+  foldersVersion?: number;
+  onUnauthorized?: () => void;
+  slicerSettings?: SlicerSettings;
+  theme: ResolvedTheme;
+};
 
 type RefreshOpts = { tags?: string[]; search?: string };
 type GroupBucket = { id: string; title: string; items: Asset[] };
 
-export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized }: Props) {
+export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized, slicerSettings, theme }: Props) {
   const [items, setItems] = useState<Asset[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -43,6 +55,12 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDownloading, setBulkDownloading] = useState<string | null>(null);
+  const dragDepth = useRef(0);
+  const [dragActive, setDragActive] = useState(false);
+  const [dropUploading, setDropUploading] = useState(false);
+  const slicerEnabled = Boolean(slicerSettings?.enabled);
+  const slicerLabel = slicerLabelFor(slicerSettings?.selected);
+  const zipPrompt = useZipImportPrompt();
 
   const handleApiError = (err: unknown, message?: string) => {
     if (err instanceof UnauthorizedError) {
@@ -70,6 +88,96 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
     }
   };
 
+  const isFileDrag = (e: React.DragEvent<HTMLDivElement>) => {
+    const types = Array.from(e.dataTransfer?.types || []);
+    return types.includes("Files");
+  };
+
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current += 1;
+    setDragActive(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0;
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDragActive(false);
+    setDropUploading(true);
+    const entries = await entriesFromDataTransfer(e.dataTransfer);
+    if (!entries.length) {
+      setDropUploading(false);
+      return;
+    }
+    const normalEntries = entries.filter(entry => !isZipFile(entry.file.name));
+    const zipEntries = entries.filter(entry => isZipFile(entry.file.name));
+    let uploaded = 0;
+    const failed: string[] = [];
+    const applyResult = (result: { uploaded: number; failed: string[] }) => {
+      uploaded += result.uploaded;
+      failed.push(...result.failed);
+    };
+    if (normalEntries.length) {
+      const result = await uploadEntriesToFolder(normalEntries, folderId || null, onUnauthorized);
+      applyResult(result);
+    }
+    for (const entry of zipEntries) {
+      let zipData: Record<string, Uint8Array> | null = null;
+      const baseParts = entry.relativePath.split("/").filter(Boolean);
+      baseParts.pop();
+      const basePath = baseParts.join("/");
+      await zipPrompt.prompt({
+        label: entry.file.name,
+        onImportAsZip: async () => {
+          const result = await uploadEntriesToFolder([entry], folderId || null, onUnauthorized);
+          applyResult(result);
+        },
+        loadEntries: async () => {
+          const result = await readZipEntries(entry.file);
+          zipData = result.data;
+          return result.entries;
+        },
+        onImportSelected: async (selectedPaths: string[]) => {
+          if (!zipData) {
+            const result = await readZipEntries(entry.file);
+            zipData = result.data;
+          }
+          const unzipEntries = buildUploadEntriesFromZip(zipData || {}, selectedPaths, basePath);
+          const result = await uploadEntriesToFolder(unzipEntries, folderId || null, onUnauthorized);
+          applyResult(result);
+        },
+      });
+    }
+    if (uploaded) {
+      await refresh();
+    }
+    if (failed.length) {
+      alert(`Failed to upload: ${failed.join(", ")}`);
+    }
+    setDropUploading(false);
+  };
+
   useEffect(() => { refresh(); }, [folderId]);
   useEffect(() => {
     (async () => {
@@ -92,11 +200,22 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
     return Array.from(t).sort((a,b)=>a.localeCompare(b));
   }, [items]);
 
+  const itemById = useMemo(() => {
+    const map: Record<string, Asset> = {};
+    items.forEach(it => { map[it.id] = it; });
+    return map;
+  }, [items]);
+
   const folderById = useMemo(() => {
     const map: Record<string, Folder> = {};
     folders.forEach(f => { map[f.id] = f; });
     return map;
   }, [folders]);
+
+  const dropTargetName = useMemo(() => {
+    if (!folderId) return "All Items";
+    return folderById[folderId]?.name || "this folder";
+  }, [folderId, folderById]);
 
   const folderNames = useMemo(() => {
     const m: Record<string, string> = {};
@@ -240,11 +359,29 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
   };
 
   const onSaveTags = async (id: string, tags: string[]) => {
-    try {
-      await setTags(id, tags);
+    const targets = selectedIds.has(id) && selectedIds.size > 1
+      ? Array.from(selectedIds)
+      : [id];
+    const failed: string[] = [];
+    let aborted = false;
+    for (const targetId of targets) {
+      try {
+        await setTags(targetId, tags);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          onUnauthorized?.();
+          aborted = true;
+          break;
+        }
+        console.error(err);
+        failed.push(itemById[targetId]?.filename || targetId);
+      }
+    }
+    if (!aborted) {
       await refresh();
-    } catch (err) {
-      handleApiError(err, "Tag update failed. Please try again.");
+    }
+    if (failed.length) {
+      alert(`Tag update failed for: ${failed.join(", ")}`);
     }
   };
 
@@ -300,6 +437,18 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
     }
   };
 
+  const openInSlicer = (asset: Asset) => {
+    if (!slicerEnabled) return;
+    const url = fileUrl(asset.url);
+    const params = new URLSearchParams({
+      url,
+      slicer: slicerSettings?.selected || "orca",
+      filename: asset.filename || "model",
+    });
+    const target = `makersvault-slicer://open?${params.toString()}`;
+    window.location.href = target;
+  };
+
   const downloadSelected = async () => {
     if (!selectedIds.size) {
       alert("Select at least one item to download.");
@@ -334,24 +483,61 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
   };
 
   const removeAsset = async (asset: Asset) => {
-    if (!confirm(`Delete "${asset.title || asset.filename}"? This cannot be undone.`)) {
+    const targets = selectedIds.has(asset.id) && selectedIds.size > 1
+      ? Array.from(selectedIds)
+      : [asset.id];
+    const confirmLabel = targets.length > 1
+      ? `Delete ${targets.length} selected items? This cannot be undone.`
+      : `Delete "${asset.title || asset.filename}"? This cannot be undone.`;
+    if (!confirm(confirmLabel)) {
       return;
     }
-    try {
-      setDeletingId(asset.id);
-      await deleteAsset(asset.id);
-      await refresh();
-    } catch (err) {
-      if (!handleApiError(err)) {
-        alert("Delete failed. Please try again.");
+    setDeletingId(asset.id);
+    const failed: string[] = [];
+    let aborted = false;
+    for (const targetId of targets) {
+      try {
+        await deleteAsset(targetId);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          onUnauthorized?.();
+          aborted = true;
+          break;
+        }
+        console.error(err);
+        failed.push(itemById[targetId]?.filename || targetId);
       }
-    } finally {
-      setDeletingId(null);
     }
+    if (!aborted) {
+      await refresh();
+    }
+    if (failed.length) {
+      alert(`Delete failed for: ${failed.join(", ")}`);
+    }
+    setDeletingId(null);
   };
 
+  const showDropOverlay = dragActive || dropUploading;
+  const dropMessage = dropUploading
+    ? `Uploading to ${dropTargetName}...`
+    : `Drop files or folders to upload to ${dropTargetName}`;
+
   return (
-    <div className="flex flex-col gap-4">
+    <div
+      className="relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {showDropOverlay && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-accent bg-panel-overlay pointer-events-none">
+          <div className="px-4 py-3 rounded-md border border-panel-strong bg-panel-strong shadow-sm text-sm">
+            {dropMessage}
+          </div>
+        </div>
+      )}
+      <div className="flex flex-col gap-4">
       <div className="flex items-center gap-3 flex-wrap">
         <input
           value={q}
@@ -363,10 +549,10 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
             }
           }}
           placeholder="Search title, filename, notes..."
-          className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white/70 dark:bg-neutral-900/70 w-80"
+          className="px-3 py-2 rounded-md border border-panel-strong bg-panel-soft w-80"
         />
         <button
-          className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 disabled:opacity-60"
+          className="px-3 py-2 rounded-md border border-panel-strong disabled:opacity-60"
           onClick={() => refresh({ search: q })}
           disabled={loading}
         >
@@ -376,7 +562,7 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
         <div className="flex items-center gap-2 text-sm">
           <span className="opacity-70">Sort</span>
           <select
-            className="px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white/70 dark:bg-neutral-900/70"
+            className="px-2 py-1 rounded-md border border-panel-strong bg-panel-soft"
             value={sortKey}
             onChange={e => setSortKey(e.target.value as typeof sortKey)}
           >
@@ -388,7 +574,7 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
           <button
             type="button"
             onClick={() => setSortDir(prev => (prev === "asc" ? "desc" : "asc"))}
-            className="px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700"
+            className="px-2 py-1 rounded-md border border-panel-strong"
           >
             {sortDir === "asc" ? "Asc" : "Desc"}
           </button>
@@ -404,7 +590,7 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
               <button
                 key={t}
                 className={`px-2 py-1 rounded-full text-sm border transition-colors ${
-                  active ? "ring-2 ring-offset-1 ring-emerald-500 dark:ring-offset-neutral-900" : ""
+                  active ? "ring-2 ring-offset-1 ring-[color:var(--mv-accent)] ring-offset-[color:var(--mv-bg)]" : ""
                 }`}
                 style={{
                   backgroundColor: active ? colors.bg : "transparent",
@@ -419,7 +605,7 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
           })}
           {activeTags.length>0 && (
             <button
-              className="px-2 py-1 rounded-full text-sm border border-neutral-300 dark:border-neutral-700"
+              className="px-2 py-1 rounded-full text-sm border border-panel-strong"
               onClick={() => { setActiveTags([]); refresh({ tags: [] }); }}
             >
               Reset
@@ -435,7 +621,7 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
             return (
               <div
                 key={group.id}
-                className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70"
+                className="rounded-lg border border-panel bg-panel-soft"
               >
                 <button
                   className="w-full flex items-center justify-between px-4 py-3 text-left"
@@ -471,6 +657,10 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
                             onToggleSelected={() => toggleSelected(it.id)}
                             hasSelection={selectedIds.size > 0}
                             bulkDownloading={Boolean(bulkDownloading)}
+                            slicerEnabled={slicerEnabled}
+                            slicerLabel={slicerLabel}
+                            onOpenInSlicer={openInSlicer}
+                            theme={theme}
                           />
                         </div>
                       ))}
@@ -507,14 +697,19 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
               onToggleSelected={() => toggleSelected(it.id)}
               hasSelection={selectedIds.size > 0}
               bulkDownloading={Boolean(bulkDownloading)}
+              slicerEnabled={slicerEnabled}
+              slicerLabel={slicerLabel}
+              onOpenInSlicer={openInSlicer}
+              theme={theme}
             />
           ))}
         </div>
       )}
-
       {previewItem && (
-        <AssetPreviewModal asset={previewItem} onClose={() => setPreviewItem(null)} />
+        <AssetPreviewModal asset={previewItem} theme={theme} onClose={() => setPreviewItem(null)} />
       )}
+      {zipPrompt.modal}
+      </div>
     </div>
   );
 }
@@ -538,6 +733,10 @@ function AssetCard({
   onToggleSelected,
   hasSelection,
   bulkDownloading,
+  slicerEnabled,
+  slicerLabel,
+  onOpenInSlicer,
+  theme,
 }: {
   item: Asset;
   onSaveTags: (id: string, tags: string[]) => void;
@@ -557,6 +756,10 @@ function AssetCard({
   onToggleSelected: () => void;
   hasSelection: boolean;
   bulkDownloading: boolean;
+  slicerEnabled: boolean;
+  slicerLabel: string;
+  onOpenInSlicer: (asset: Asset) => void;
+  theme: ResolvedTheme;
 }) {
   const [editingTags, setEditingTags] = useState(false);
   const [tagList, setTagList] = useState<string[]>(item.tags);
@@ -672,15 +875,17 @@ function AssetCard({
     }
   };
 
+  const canOpenInSlicer = slicerEnabled && MODEL_EXTS.has(extOf(item.filename));
+
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden bg-white/60 dark:bg-neutral-900/60">
+    <div className="rounded-lg border border-panel overflow-hidden bg-panel-soft">
       <div
         className="h-40 relative cursor-pointer"
         onDoubleClick={() => onPreview(item)}
         title="Double-click to open large preview"
         onClick={e => e.stopPropagation()}
       >
-        {renderPreviewContent(item, "card")}
+        {renderPreviewContent(item, "card", theme)}
       </div>
       <div className="p-3 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
@@ -698,7 +903,7 @@ function AssetCard({
               value={downloadChoice}
               onChange={handleDownloadChange}
               disabled={downloading || bulkDownloading}
-              className="px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-sm"
+              className="px-2 py-1 rounded-md border border-panel-strong bg-panel-strong text-sm"
             >
               <option value="">Download...</option>
               <option value="single">Download file</option>
@@ -712,15 +917,24 @@ function AssetCard({
             )}
           </div>
         </div>
+        {canOpenInSlicer && (
+          <button
+            className="self-end text-xs px-2 py-1 rounded-md border border-panel-strong disabled:opacity-60"
+            onClick={() => onOpenInSlicer(item)}
+            disabled={downloading || bulkDownloading}
+          >
+            Open in {slicerLabel}
+          </button>
+        )}
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-semibold uppercase text-neutral-500 dark:text-neutral-400">
+          <label className="text-xs font-semibold uppercase text-muted">
             {moving ? "Updating..." : "Folder"}
           </label>
           <select
             value={item.folder_id || ""}
             onChange={handleFolderChange}
             disabled={moving}
-            className="px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-sm"
+            className="px-2 py-1 rounded-md border border-panel-strong bg-panel-strong text-sm"
           >
             {folderOptions.map(opt => (
               <option key={opt.id || "none"} value={opt.id || ""}>
@@ -743,7 +957,7 @@ function AssetCard({
               onBlur={commitRename}
               onKeyDown={handleRenameKey}
               onClick={e => e.stopPropagation()}
-              className="px-2 py-1 w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white/80 dark:bg-neutral-900/80 text-sm"
+              className="px-2 py-1 w-full rounded-md border border-panel-strong bg-panel-soft text-sm"
               autoFocus
             />
           ) : (
@@ -757,11 +971,11 @@ function AssetCard({
             <span className="text-xs opacity-60">No tags</span>
           )}
         </div>
-        <div className="border border-dashed border-neutral-300 dark:border-neutral-700 rounded-md p-2 text-sm flex flex-col gap-2">
-          <div className="flex items-center justify-between text-xs uppercase tracking-wide text-neutral-500">
+        <div className="border border-dashed border-panel-strong rounded-md p-2 text-sm flex flex-col gap-2">
+          <div className="flex items-center justify-between text-xs uppercase tracking-wide text-muted">
             <span>Notes</span>
             <button
-              className="text-[11px] px-2 py-0.5 rounded-md border border-neutral-300 dark:border-neutral-700"
+              className="text-[11px] px-2 py-0.5 rounded-md border border-panel-strong"
               onClick={() => setNotesCollapsed(v => !v)}
             >
               {notesCollapsed ? "Expand" : "Collapse"}
@@ -774,21 +988,21 @@ function AssetCard({
                   <textarea
                     value={notesValue}
                     onChange={e => setNotesValue(e.target.value)}
-                    className="w-full min-h-[80px] rounded-md border border-neutral-300 dark:border-neutral-700 bg-white/70 dark:bg-neutral-900/70 p-2"
+                    className="w-full min-h-[80px] rounded-md border border-panel-strong bg-panel-soft p-2"
                     placeholder="Add some details about this asset"
                   />
                   <div className="flex flex-wrap gap-2">
-                    <button className="text-sm px-3 py-1 rounded-md bg-emerald-600 text-white" onClick={saveNotes}>Save</button>
-                    <button className="text-sm px-3 py-1 rounded-md border" onClick={cancelNotes}>Cancel</button>
+                    <button className="text-sm px-3 py-1 rounded-md bg-accent" onClick={saveNotes}>Save</button>
+                    <button className="text-sm px-3 py-1 rounded-md border border-panel-strong" onClick={cancelNotes}>Cancel</button>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className={`text-sm whitespace-pre-wrap ${noteText ? "text-neutral-800 dark:text-neutral-100" : "opacity-60"}`}>
+                  <div className={`text-sm whitespace-pre-wrap ${noteText ? "text-foreground" : "opacity-60"}`}>
                     {noteText || "Add notes"}
                   </div>
                   <button
-                    className="self-start text-xs px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700"
+                    className="self-start text-xs px-2 py-1 rounded-md border border-panel-strong"
                     onClick={() => setEditingNotes(true)}
                   >
                     {noteText ? "Edit notes" : "Add notes"}
@@ -798,7 +1012,7 @@ function AssetCard({
             </>
           )}
           {notesCollapsed && (
-            <div className={`text-sm ${noteText ? "text-neutral-700 dark:text-neutral-200" : "opacity-60"}`}>
+            <div className={`text-sm ${noteText ? "text-foreground" : "opacity-60"}`}>
               {noteText ? `${noteText.slice(0, 60)}${noteText.length > 60 ? "..." : ""}` : "No notes"}
             </div>
           )}
@@ -812,13 +1026,13 @@ function AssetCard({
               placeholder="Type and press comma/Enter"
             />
             <div className="flex flex-wrap gap-2">
-              <button className="text-sm px-3 py-1 rounded-md bg-emerald-600 text-white" onClick={save}>Save</button>
-              <button className="text-sm px-3 py-1 rounded-md border" onClick={cancelEditing}>Cancel</button>
+              <button className="text-sm px-3 py-1 rounded-md bg-accent" onClick={save}>Save</button>
+              <button className="text-sm px-3 py-1 rounded-md border border-panel-strong" onClick={cancelEditing}>Cancel</button>
             </div>
           </div>
         ) : (
           <div className="flex items-center gap-2 flex-wrap">
-            <button className="text-sm px-2 py-1 rounded-md border border-neutral-300 dark:border-neutral-700" onClick={startEditing}>Edit tags</button>
+            <button className="text-sm px-2 py-1 rounded-md border border-panel-strong" onClick={startEditing}>Edit tags</button>
             <button
               className="text-sm px-2 py-1 rounded-md border border-red-300 text-red-700 dark:text-red-300 disabled:opacity-60"
               onClick={() => onDelete(item)}
@@ -835,15 +1049,15 @@ function AssetCard({
 
 type PreviewVariant = "card" | "modal";
 
-function renderPreviewContent(asset: Asset, variant: PreviewVariant) {
+function renderPreviewContent(asset: Asset, variant: PreviewVariant, theme: ResolvedTheme) {
   const ext = extOf(asset.filename);
   const assetUrl = fileUrl(asset.url);
   const thumbUrl = asset.thumb_url ? fileUrl(asset.thumb_url) : null;
   const imgClass =
     variant === "card"
       ? "w-full h-full object-cover"
-      : "w-full h-full object-contain bg-white";
-  const is3d = ["stl", "3mf", "step", "stp", "obj"].includes(ext);
+      : "w-full h-full object-contain bg-panel-strong";
+  const is3d = MODEL_EXTS.has(ext);
 
   if (variant === "card") {
     if (thumbUrl) {
@@ -853,7 +1067,7 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant) {
       return <img src={assetUrl} alt={asset.filename} className={imgClass} />;
     }
     if (is3d) {
-      return <ModelSnapshot url={assetUrl} ext={ext} assetId={asset.id} />;
+      return <ModelSnapshot url={assetUrl} ext={ext} assetId={asset.id} theme={theme} />;
     }
     return (
       <div className="flex items-center justify-center w-full h-full text-sm opacity-60">
@@ -863,7 +1077,7 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant) {
   }
 
   if (is3d) {
-    return <ModelViewer key={`${variant}-${asset.id}`} url={assetUrl} ext={ext} assetId={asset.id} />;
+    return <ModelViewer key={`${variant}-${asset.id}`} url={assetUrl} ext={ext} assetId={asset.id} theme={theme} />;
   }
   if (thumbUrl || ext === "svg") {
     const src = thumbUrl || assetUrl;
@@ -876,7 +1090,7 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant) {
   );
 }
 
-function AssetPreviewModal({ asset, onClose }: { asset: Asset; onClose: () => void }) {
+function AssetPreviewModal({ asset, theme, onClose }: { asset: Asset; theme: ResolvedTheme; onClose: () => void }) {
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   return (
     <div
@@ -884,10 +1098,10 @@ function AssetPreviewModal({ asset, onClose }: { asset: Asset; onClose: () => vo
       onClick={onClose}
     >
       <div
-        className="bg-white dark:bg-neutral-900 rounded-lg shadow-2xl max-w-5xl w-full max-h-full overflow-hidden flex flex-col"
+        className="bg-panel-strong rounded-lg shadow-2xl max-w-5xl w-full max-h-full overflow-hidden flex flex-col"
         onClick={stop}
       >
-        <div className="flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800 px-4 py-3">
+        <div className="flex items-center justify-between border-b border-panel px-4 py-3">
           <div>
             <h2 className="text-lg font-semibold">{asset.title || asset.filename}</h2>
             <p className="text-sm opacity-70">
@@ -895,7 +1109,7 @@ function AssetPreviewModal({ asset, onClose }: { asset: Asset; onClose: () => vo
             </p>
           </div>
           <button
-            className="px-3 py-1 rounded-md border border-neutral-300 dark:border-neutral-700 text-sm"
+            className="px-3 py-1 rounded-md border border-panel-strong text-sm"
             onClick={onClose}
           >
             Close
@@ -903,8 +1117,8 @@ function AssetPreviewModal({ asset, onClose }: { asset: Asset; onClose: () => vo
         </div>
         <div className="p-4 space-y-4 overflow-auto">
           <div className="w-full h-[70vh] min-h-[400px]">
-            <div className="w-full h-full rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center overflow-hidden">
-              {renderPreviewContent(asset, "modal")}
+            <div className="w-full h-full rounded-lg bg-panel-soft flex items-center justify-center overflow-hidden">
+              {renderPreviewContent(asset, "modal", theme)}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -915,20 +1129,20 @@ function AssetPreviewModal({ asset, onClose }: { asset: Asset; onClose: () => vo
             )}
           </div>
           {asset.notes && (
-            <div className="text-sm border border-dashed border-neutral-300 dark:border-neutral-700 rounded-md p-3 whitespace-pre-wrap">
+            <div className="text-sm border border-dashed border-panel-strong rounded-md p-3 whitespace-pre-wrap">
               {asset.notes}
             </div>
           )}
           <div className="flex gap-3">
             <a
-              className="px-3 py-2 rounded-md bg-emerald-600 text-white text-sm"
+              className="px-3 py-2 rounded-md bg-accent text-sm"
               href={fileUrl(asset.url)}
               download={asset.filename}
             >
               Download
             </a>
             <button
-              className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 text-sm"
+              className="px-3 py-2 rounded-md border border-panel-strong text-sm"
               onClick={onClose}
             >
               Close

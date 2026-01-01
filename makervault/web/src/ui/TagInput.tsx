@@ -45,7 +45,7 @@ export default function TagInput({ value, onChange, placeholder }: TagInputProps
 
   return (
     <div
-      className="flex flex-wrap gap-2 px-2 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white/80 dark:bg-neutral-900/80 text-sm"
+      className="flex flex-wrap gap-2 px-2 py-2 rounded-md border border-panel-strong bg-panel-soft text-sm"
       onClick={() => inputRef.current?.focus()}
     >
       {value.map((tag, idx) => (
@@ -58,7 +58,7 @@ export default function TagInput({ value, onChange, placeholder }: TagInputProps
         onKeyDown={handleKeyDown}
         onBlur={handleBlur}
         placeholder={value.length === 0 ? placeholder : ""}
-        className="flex-1 min-w-[120px] bg-transparent outline-none text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400"
+        className="flex-1 min-w-[120px] bg-transparent outline-none text-sm text-foreground placeholder:text-[color:var(--mv-text-subtle)]"
       />
     </div>
   );

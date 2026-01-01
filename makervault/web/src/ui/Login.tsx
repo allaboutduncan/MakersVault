@@ -1,10 +1,26 @@
 import React from "react";
 import { login } from "../lib/api";
+import { ResolvedTheme } from "../lib/settings";
 
 type Props = {
   onSuccess: (token: string, expires_in: number) => void;
   apiUp: boolean | null;
-  theme: "light" | "dark";
+  theme: ResolvedTheme;
+};
+
+const logoForTheme = (theme: ResolvedTheme) => {
+  switch (theme) {
+    case "neon":
+      return "/img/green_theme/Neon_Green_bgrm.png";
+    case "purple":
+      return "/img/purple_theme/Neon_Purple_logo_bgrm.png";
+    case "blue":
+      return "/img/blue_theme/Blue_Theme_logo_bgrm.png";
+    case "dark":
+      return "/img/whitelogo.png";
+    default:
+      return "/img/blacklogo.png";
+  }
 };
 
 export default function Login({ onSuccess, apiUp, theme }: Props) {
@@ -33,16 +49,16 @@ export default function Login({ onSuccess, apiUp, theme }: Props) {
   };
 
   return (
-    <div className="w-full max-w-md rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-900/80 p-6 shadow-xl backdrop-blur">
+    <div className="w-full max-w-md rounded-xl border border-panel bg-panel-soft p-6 shadow-xl backdrop-blur">
       <div className="mb-6 text-center space-y-3">
         <div className="flex justify-center">
           <img
-            src={theme === "dark" ? "/img/whitelogo.png" : "/img/blacklogo.png"}
+            src={logoForTheme(theme)}
             alt="Makers Vault"
             className="max-h-40 w-auto"
           />
         </div>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">Sign in to continue</p>
+        <p className="text-sm text-muted">Sign in to continue</p>
       </div>
       {apiUp === false && (
         <div className="mb-4 rounded-md bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-100 px-3 py-2 text-sm">
@@ -60,7 +76,7 @@ export default function Login({ onSuccess, apiUp, theme }: Props) {
           <input
             value={username}
             onChange={e => setUsername(e.target.value)}
-            className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+            className="px-3 py-2 rounded-md border border-panel-strong bg-panel-strong"
             autoComplete="username"
             required
           />
@@ -71,7 +87,7 @@ export default function Login({ onSuccess, apiUp, theme }: Props) {
             type="password"
             value={password}
             onChange={e => setPassword(e.target.value)}
-            className="px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+            className="px-3 py-2 rounded-md border border-panel-strong bg-panel-strong"
             autoComplete="current-password"
             required
           />
@@ -79,7 +95,7 @@ export default function Login({ onSuccess, apiUp, theme }: Props) {
         <button
           type="submit"
           disabled={loading}
-          className="w-full px-3 py-2 rounded-md bg-emerald-600 text-white font-medium disabled:opacity-60"
+          className="w-full px-3 py-2 rounded-md bg-accent font-medium disabled:opacity-60"
         >
           {loading ? "Signing in..." : "Sign in"}
         </button>

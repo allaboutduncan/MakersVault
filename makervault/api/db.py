@@ -20,3 +20,13 @@ def ensure_folder_parent_column() -> None:
       return
     if "parent_id" not in cols:
       conn.exec_driver_sql("ALTER TABLE folder ADD COLUMN parent_id TEXT")
+
+
+def ensure_asset_source_path_column() -> None:
+  """Lightweight migration for mount import tracking."""
+  with engine.connect() as conn:
+    cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(asset);").fetchall()]
+    if not cols:
+      return
+    if "source_path" not in cols:
+      conn.exec_driver_sql("ALTER TABLE asset ADD COLUMN source_path TEXT")

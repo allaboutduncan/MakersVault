@@ -1,0 +1,13 @@
+{
+  "download_dir": "",
+  "log_file": "",
+  "slicers": {
+    "orca": {
+      "command": "C:\\\\Program Files\\\\OrcaSlicer\\\\OrcaSlicer.exe"
+    },
+    "prusa": {
+      "command": "/usr/bin/prusa-slicer",
+      "args": []
+    }
+  }
+}

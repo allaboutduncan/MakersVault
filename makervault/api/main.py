@@ -4,10 +4,13 @@ from starlette.middleware.cors import CORSMiddleware
 from sqlmodel import SQLModel, Session, select
 from typing import List, Optional
 from pathlib import Path
-from PIL import Image
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 import tempfile
-import os, json, time, uuid, jwt
+import threading
+from urllib.parse import quote
+import json
+import os
+import jwt
 from jwt import PyJWTError
 
 from auth import (
@@ -20,10 +23,15 @@ from auth import (
     create_token,
     require_auth,
 )
-from db import DB_URL, STORAGE, THUMBS, engine, ensure_folder_parent_column
+from asset_service import asset_path, save_thumb
+from config import MOUNT_IMPORT_ENABLED, MOUNT_IMPORT_PATH
+from db import STORAGE, THUMBS, engine, ensure_folder_parent_column, ensure_asset_source_path_column
+from file_utils import build_import_filename, mime_from_content_type, sanitize_filename
+from folder_service import validate_parent_folder
+from import_service import download_import_to_temp, import_asset_from_url, open_import_response
+from mount_import import scan_mount_imports
 from models import Asset, Folder
 from schemas import (
-    AssetCreate,
     AssetOut,
     FolderIn,
     FolderOut,
@@ -34,7 +42,15 @@ from schemas import (
     AssetMetaUpdate,
     AssetRename,
     AssetFolderUpdate,
+    ImportRequest,
+    ImportInspectOut,
+    ImportZipEntriesRequest,
+    ImportZipEntriesOut,
+    ImportZipExtractRequest,
+    ImportZipResult,
 )
+from zip_service import extract_zip_entries_to_assets, list_zip_entries
+from url_utils import normalize_import_url
 
 app = FastAPI(title="MakerVault API")
 
@@ -54,62 +70,21 @@ app.add_middleware(
 def on_startup():
     SQLModel.metadata.create_all(engine)
     ensure_folder_parent_column()
+    ensure_asset_source_path_column()
+    if MOUNT_IMPORT_PATH and MOUNT_IMPORT_ENABLED:
+        threading.Thread(target=scan_mount_imports, daemon=True).start()
 
 
 # Utilities ------------------------------------------------------
-
-
-def validate_parent_folder(session: Session, parent_id: Optional[str], folder_id: Optional[str] = None) -> Optional[str]:
-    """Ensure a parent folder exists and does not introduce cycles."""
-    if not parent_id:
-        return None
-    parent = session.get(Folder, parent_id)
-    if not parent:
-        raise HTTPException(status_code=400, detail="Parent folder not found")
-    if folder_id and parent_id == folder_id:
-        raise HTTPException(status_code=400, detail="Folder cannot be its own parent")
-
-    # Walk ancestors to detect loops
-    ancestor = parent
-    visited = set([folder_id]) if folder_id else set()
-    while ancestor and ancestor.parent_id:
-        if ancestor.parent_id in visited:
-            raise HTTPException(status_code=400, detail="Invalid parent: would create a cycle")
-        if folder_id and ancestor.parent_id == folder_id:
-            raise HTTPException(status_code=400, detail="Invalid parent: would create a cycle")
-        visited.add(ancestor.parent_id)
-        ancestor = session.get(Folder, ancestor.parent_id)
-    return parent_id
 
 
 def folder_to_out(f: Folder) -> "FolderOut":
     return FolderOut(id=f.id, name=f.name, tags=json.loads(f.tags_json or "[]"), parent_id=f.parent_id)
 
 
-def asset_dir(asset_id: str) -> Path:
-    p = STORAGE / asset_id
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def asset_path(asset_id: str, name: str) -> Path:
-    return asset_dir(asset_id) / name
-
-
-def save_thumb(asset_id: str, src: Path) -> Optional[str]:
-    try:
-        thumb = THUMBS / f"{asset_id}.jpg"
-        with Image.open(src) as im:
-            im = im.convert("RGB")
-            im.thumbnail((512, 512))
-            im.save(thumb, quality=88)
-        return f"/thumb/{asset_id}.jpg"
-    except Exception:
-        return None
-
-
 def to_out(a: Asset) -> AssetOut:
     tags = json.loads(a.tags_json or "[]")
+    safe_filename = quote(a.filename or "", safe="")
     return AssetOut(
         id=a.id,
         filename=a.filename,
@@ -118,7 +93,7 @@ def to_out(a: Asset) -> AssetOut:
         title=a.title,
         notes=a.notes,
         tags=tags,
-        url=f"/file/{a.id}/{a.filename}",
+        url=f"/file/{a.id}/{safe_filename}",
         thumb_url=f"/thumb/{a.id}.jpg" if (THUMBS / f"{a.id}.jpg").exists() else None,
         folder_id=a.folder_id,
     )
@@ -196,8 +171,9 @@ async def upload(
     folder_id: Optional[str] = Form(default=None),
     _: Optional[str] = Depends(require_auth),
 ):
+    safe_name = sanitize_filename(file.filename)
     asset = Asset(
-        filename=file.filename,
+        filename=safe_name,
         mime=file.content_type or "application/octet-stream",
         size=0,
         title=title,
@@ -236,6 +212,58 @@ async def upload(
             asset = db_a
 
     return to_out(asset)
+
+
+@app.post("/import", response_model=AssetOut)
+def import_from_link(body: ImportRequest, _: Optional[str] = Depends(require_auth)):
+    url = normalize_import_url(body.url)
+    asset = import_asset_from_url(url, body)
+    return to_out(asset)
+
+
+@app.post("/import/inspect", response_model=ImportInspectOut)
+def inspect_import_link(body: ImportRequest, _: Optional[str] = Depends(require_auth)):
+    url = normalize_import_url(body.url)
+    resp, final_url = open_import_response(url, body)
+    with resp:
+        filename = build_import_filename(final_url, resp.headers, body.filename)
+        mime = mime_from_content_type(resp.headers.get("Content-Type", ""), filename)
+    is_zip = Path(filename).suffix.lower() == ".zip"
+    return ImportInspectOut(filename=filename, mime=mime, is_zip=is_zip)
+
+
+@app.post("/import/zip/entries", response_model=ImportZipEntriesOut)
+def list_import_zip_entries(body: ImportZipEntriesRequest, _: Optional[str] = Depends(require_auth)):
+    url = normalize_import_url(body.url)
+    tmp_path, filename, _ = download_import_to_temp(url, body)
+    try:
+        if Path(filename).suffix.lower() != ".zip":
+            raise HTTPException(status_code=415, detail="Imported file is not a zip")
+        try:
+            entries = list_zip_entries(tmp_path)
+        except BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid zip file")
+        if not entries:
+            raise HTTPException(status_code=400, detail="No files found in zip")
+        return ImportZipEntriesOut(filename=filename, entries=entries)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.post("/import/zip", response_model=ImportZipResult)
+def import_zip_entries(body: ImportZipExtractRequest, _: Optional[str] = Depends(require_auth)):
+    url = normalize_import_url(body.url)
+    tmp_path, filename, _ = download_import_to_temp(url, body)
+    try:
+        if Path(filename).suffix.lower() != ".zip":
+            raise HTTPException(status_code=415, detail="Imported file is not a zip")
+        try:
+            assets, failed = extract_zip_entries_to_assets(tmp_path, body.entries, body)
+        except BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid zip file")
+        return ImportZipResult(assets=[to_out(asset) for asset in assets], failed=failed)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 @app.get("/file/{asset_id}/{name}")
