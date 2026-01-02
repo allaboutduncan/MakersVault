@@ -21,6 +21,17 @@
   <li>Deployment: Docker, Docker Compose.</li>
 </ul>
 
+<h2>Road Map</h2>
+<h4>Version 5.1</h4>
+<ul>
+  <li>Open in Lightburn Setting</li>
+  <li>MFA and other security related features</li>
+  <li>New themes</li>
+  <li>Bulk move</li>
+  <li>View sub-folders in root folders.</li>
+  <li>Robust handling for adding existing folders from OS.</li>
+</ul>
+
 <h2>Getting Started</h2>
 <p>Makers Vault is deployable using Docker pull or Docker Compose:</p>
 <h3>Docker Compose</h3>
