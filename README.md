@@ -25,7 +25,7 @@
 <h4>Version 5.1</h4>
 <ul>
   <li>Open in Lightburn Setting</li>
-  <li>MFA and other security related features</li>
+  <li>MFA and multi-user</li>
   <li>New themes</li>
   <li>Bulk move</li>
   <li>View sub-folders in root folders.</li>
