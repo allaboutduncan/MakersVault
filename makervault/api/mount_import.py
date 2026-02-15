@@ -13,10 +13,12 @@ from config import (
     MOUNT_IMPORT_EXTS_RAW,
     MOUNT_IMPORT_INCLUDE_HIDDEN,
     MOUNT_IMPORT_PATH,
+    MOUNT_IMPORT_COPY,
 )
 from db import STORAGE, engine
 from file_utils import guess_mime_from_path, sanitize_filename
 from models import Asset
+from settings_service import get_mount_import_copy
 from zip_service import resolve_zip_folder_id
 
 
@@ -50,6 +52,7 @@ def scan_mount_imports() -> None:
         return
 
     allowed_exts = parse_mount_import_exts(MOUNT_IMPORT_EXTS_RAW)
+    copy_files = get_mount_import_copy(MOUNT_IMPORT_COPY)
     root_abs = root.resolve()
     root_prefix = root_abs.as_posix().rstrip("/")
     storage_abs = STORAGE.resolve()
@@ -120,11 +123,15 @@ def scan_mount_imports() -> None:
                     folder_id,
                     source_path=source_path,
                 )
-                dest = asset_path(asset.id, asset.filename)
                 try:
-                    shutil.copyfile(path, dest)
-                    if (mime or "").startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-                        save_thumb(asset.id, dest)
+                    if copy_files:
+                        dest = asset_path(asset.id, asset.filename)
+                        shutil.copyfile(path, dest)
+                        if (mime or "").startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                            save_thumb(asset.id, dest)
+                    else:
+                        if (mime or "").startswith("image/") and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                            save_thumb(asset.id, path)
                     finalize_asset_record(asset.id, size, mime)
                     imported += 1
                     existing_sources.add(source_path)

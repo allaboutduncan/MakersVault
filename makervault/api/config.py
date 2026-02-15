@@ -16,8 +16,8 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-IMPORT_ALLOWED_EXTS = {".stl", ".3mf", ".step", ".stp", ".zip"}
-IMPORT_EXT_PRIORITY = [".3mf", ".stl", ".step", ".stp", ".zip"]
+IMPORT_ALLOWED_EXTS = {".stl", ".3mf", ".step", ".stp", ".lbrn", ".lbrn2", ".zip"}
+IMPORT_EXT_PRIORITY = [".3mf", ".stl", ".step", ".stp", ".lbrn2", ".lbrn", ".zip"]
 IMPORT_BLOCKED_EXTS = {
     ".jpg",
     ".jpeg",
@@ -56,6 +56,7 @@ MOUNT_IMPORT_PATH = (os.getenv("IMPORT_MOUNT_PATH") or os.getenv("MOUNT_IMPORT_P
 MOUNT_IMPORT_EXTS_RAW = os.getenv("IMPORT_MOUNT_EXTS", "").strip()
 MOUNT_IMPORT_INCLUDE_HIDDEN = env_bool("IMPORT_MOUNT_INCLUDE_HIDDEN", False)
 MOUNT_IMPORT_ENABLED = env_bool("IMPORT_MOUNT_ON_STARTUP", True)
+MOUNT_IMPORT_COPY = env_bool("IMPORT_MOUNT_COPY", True)
 DEFAULT_MOUNT_IMPORT_EXTS = {
     ".stl",
     ".3mf",
@@ -68,5 +69,7 @@ DEFAULT_MOUNT_IMPORT_EXTS = {
     ".jpeg",
     ".webp",
     ".bmp",
+    ".lbrn",
+    ".lbrn2",
     ".zip",
 }

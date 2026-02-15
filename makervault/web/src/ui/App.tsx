@@ -4,7 +4,7 @@ import AssetGrid from "./AssetGrid";
 import Sidebar from "./Sidebar";
 import Login from "./Login";
 import Settings from "./Settings";
-import { API_BASE, apiHealth, refreshToken, type HealthInfo } from "../lib/api";
+import { apiHealth, getApiBase, refreshToken, type HealthInfo } from "../lib/api";
 import { clearToken, readToken, storeToken } from "../lib/auth";
 import { type AppSettings, type ResolvedTheme, loadSettings, resolveTheme, saveSettings } from "../lib/settings";
 const DEFAULT_REFRESH_SECONDS = 6 * 60 * 60; // 6 hours
@@ -51,7 +51,7 @@ export default function App() {
     root.classList.toggle("theme-purple", resolvedTheme === "purple");
     root.classList.toggle("theme-blue", resolvedTheme === "blue");
   }, [resolvedTheme]);
-  React.useEffect(() => { (async ()=> setHealth(await apiHealth()))(); }, []);
+  React.useEffect(() => { (async ()=> setHealth(await apiHealth()))(); }, [settings.network.publicUrl]);
   React.useEffect(() => {
     saveSettings(settings);
   }, [settings]);
@@ -93,6 +93,16 @@ export default function App() {
     setTokenTtl(null);
   };
 
+  const resetSavedProxyUrl = () => {
+    setSettings(prev => ({
+      ...prev,
+      network: {
+        ...prev.network,
+        publicUrl: "",
+      },
+    }));
+  };
+
   React.useEffect(() => {
     if (!token) return;
     const ttl = tokenTtl ?? DEFAULT_REFRESH_SECONDS;
@@ -127,6 +137,7 @@ export default function App() {
         selectedId={folderId}
         onSelect={handleSelectFolder}
         onFoldersChanged={handleFoldersChanged}
+        foldersVersion={folderVersion}
         onAssetsChanged={handleAssetsChanged}
         onUnauthorized={handleUnauthorized}
         onOpenSettings={() => setActiveView("settings")}
@@ -134,8 +145,17 @@ export default function App() {
       />
       <main className="flex-1 p-4 overflow-auto">
         {apiUp === false && (
-          <div className="mb-3 p-2 rounded-md bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-100">
-            API unreachable at {API_BASE}. Ensure the API container is running and port 8000 is accessible.
+          <div className="mb-3 p-2 rounded-md bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-100 flex flex-wrap items-center gap-2">
+            <span>API unreachable at {getApiBase()}. Ensure the API container is running and reachable.</span>
+            {!!settings.network.publicUrl && (
+              <button
+                className="px-2 py-1 rounded-md border border-red-400/70 text-xs font-medium"
+                onClick={resetSavedProxyUrl}
+                type="button"
+              >
+                Reset saved proxy URL
+              </button>
+            )}
           </div>
         )}
         <header className="flex items-center justify-between mb-4 gap-4 flex-wrap">
@@ -182,12 +202,17 @@ export default function App() {
             foldersVersion={folderVersion}
             onUnauthorized={handleUnauthorized}
             slicerSettings={settings.slicer}
+            engravingSettings={settings.engraving}
             theme={resolvedTheme}
           />
         ) : (
           <Settings
             settings={settings}
             onChange={setSettings}
+            onAssetsChanged={handleAssetsChanged}
+            onFoldersChanged={handleFoldersChanged}
+            onUnauthorized={handleUnauthorized}
+            onSelectFolder={handleSelectFolder}
           />
         )}
       </main>

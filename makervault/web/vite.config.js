@@ -14,7 +14,9 @@ function parseAllowedHosts(value, extras = []) {
   const extraHosts = extras.map(normalizeHostEntry).filter(Boolean);
 
   if (!value) {
-    return extraHosts.length ? Array.from(new Set(extraHosts)) : true;
+    // Default to permissive host handling in containerized/reverse-proxy setups.
+    // Users can still explicitly lock this down with VITE_ALLOWED_HOSTS.
+    return true;
   }
 
   const normalized = value

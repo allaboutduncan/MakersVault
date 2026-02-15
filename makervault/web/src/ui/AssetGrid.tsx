@@ -14,10 +14,11 @@ import {
   downloadZip,
 } from "../lib/api";
 import ModelViewer, { ModelSnapshot } from "./ModelViewer";
+import LightBurnPreview from "./LightBurnPreview";
 import TagBadge from "./TagBadge";
 import TagInput from "./TagInput";
 import { colorForTag } from "./tagColors";
-import { ResolvedTheme, SlicerSettings, slicerLabelFor } from "../lib/settings";
+import { EngravingSettings, ResolvedTheme, SlicerSettings, engraverLabelFor, slicerLabelFor } from "../lib/settings";
 import { entriesFromDataTransfer, uploadEntriesToFolder } from "../lib/uploadTree";
 import { buildUploadEntriesFromZip, isZipFile, readZipEntries } from "../lib/zipUtils";
 import { useZipImportPrompt } from "./ZipImportModal";
@@ -28,25 +29,65 @@ function extOf(name: string) {
 }
 
 const MODEL_EXTS = new Set(["stl", "3mf", "step", "stp", "obj"]);
+const LIGHTBURN_EXTS = new Set(["lbrn", "lbrn2"]);
+const ENGRAVING_EXTS = new Set([
+  "svg",
+  "dxf",
+  "ai",
+  "eps",
+  "pdf",
+  "plt",
+  "hpgl",
+  "png",
+  "jpg",
+  "jpeg",
+  "bmp",
+  "gif",
+  "tif",
+  "tiff",
+  "lbrn",
+  "lbrn2",
+  "ezd",
+]);
+
+const ROWS_PER_BATCH = 5;
+const CARD_MIN_WIDTH_PX = 260;
+const GRID_GAP_PX = 16;
+
+function rowsBatchSizeForWidth(width: number) {
+  const cols = Math.max(1, Math.floor((width + GRID_GAP_PX) / (CARD_MIN_WIDTH_PX + GRID_GAP_PX)));
+  return cols * ROWS_PER_BATCH;
+}
 
 type Props = {
   folderId?: string | null;
   foldersVersion?: number;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
+  engravingSettings?: EngravingSettings;
   theme: ResolvedTheme;
 };
 
 type RefreshOpts = { tags?: string[]; search?: string };
 type GroupBucket = { id: string; title: string; items: Asset[] };
 
-export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized, slicerSettings, theme }: Props) {
+export default function AssetGrid({
+  folderId,
+  foldersVersion = 0,
+  onUnauthorized,
+  slicerSettings,
+  engravingSettings,
+  theme,
+}: Props) {
   const [items, setItems] = useState<Asset[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -55,11 +96,17 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDownloading, setBulkDownloading] = useState<string | null>(null);
+  const [pageSize] = useState<number>(() => {
+    if (typeof window === "undefined") return ROWS_PER_BATCH;
+    return rowsBatchSizeForWidth(window.innerWidth);
+  });
   const dragDepth = useRef(0);
   const [dragActive, setDragActive] = useState(false);
   const [dropUploading, setDropUploading] = useState(false);
   const slicerEnabled = Boolean(slicerSettings?.enabled);
   const slicerLabel = slicerLabelFor(slicerSettings?.selected);
+  const engravingEnabled = Boolean(engravingSettings?.enabled);
+  const engraverLabel = engraverLabelFor(engravingSettings?.selected);
   const zipPrompt = useZipImportPrompt();
 
   const handleApiError = (err: unknown, message?: string) => {
@@ -74,17 +121,44 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
 
   const refresh = async (opts: RefreshOpts = {}) => {
     setLoading(true);
+    setHasMore(false);
+    setOffset(0);
     try {
       const data = await listAssets({
         q: opts.search ?? q,
         tags: opts.tags ?? activeTags,
         folder_id: folderId || undefined,
+        limit: pageSize,
+        offset: 0,
       });
-      setItems(data);
+      setItems(data.items);
+      setOffset(data.items.length);
+      setHasMore(data.hasMore);
     } catch (err) {
       handleApiError(err, "Failed to load assets. Please sign in again or refresh.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await listAssets({
+        q,
+        tags: activeTags,
+        folder_id: folderId || undefined,
+        limit: pageSize,
+        offset,
+      });
+      setItems(prev => [...prev, ...data.items]);
+      setOffset(offset + data.items.length);
+      setHasMore(data.hasMore);
+    } catch (err) {
+      handleApiError(err, "Failed to load more assets.");
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -359,9 +433,8 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
   };
 
   const onSaveTags = async (id: string, tags: string[]) => {
-    const targets = selectedIds.has(id) && selectedIds.size > 1
-      ? Array.from(selectedIds)
-      : [id];
+    const bulkEdit = selectedIds.has(id) && selectedIds.size > 1;
+    const targets = bulkEdit ? Array.from(selectedIds) : [id];
     const failed: string[] = [];
     let aborted = false;
     for (const targetId of targets) {
@@ -379,6 +452,9 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
     }
     if (!aborted) {
       await refresh();
+      if (bulkEdit) {
+        setSelectedIds(new Set());
+      }
     }
     if (failed.length) {
       alert(`Tag update failed for: ${failed.join(", ")}`);
@@ -446,6 +522,18 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
       filename: asset.filename || "model",
     });
     const target = `makersvault-slicer://open?${params.toString()}`;
+    window.location.href = target;
+  };
+
+  const openInEngraving = (asset: Asset) => {
+    if (!engravingEnabled) return;
+    const url = fileUrl(asset.url);
+    const params = new URLSearchParams({
+      url,
+      engraver: engravingSettings?.selected || "lightburn",
+      filename: asset.filename || "design",
+    });
+    const target = `makersvault-engrave://open?${params.toString()}`;
     window.location.href = target;
   };
 
@@ -660,6 +748,9 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
                             slicerEnabled={slicerEnabled}
                             slicerLabel={slicerLabel}
                             onOpenInSlicer={openInSlicer}
+                            engravingEnabled={engravingEnabled}
+                            engraverLabel={engraverLabel}
+                            onOpenInEngraving={openInEngraving}
                             theme={theme}
                           />
                         </div>
@@ -700,9 +791,23 @@ export default function AssetGrid({ folderId, foldersVersion = 0, onUnauthorized
               slicerEnabled={slicerEnabled}
               slicerLabel={slicerLabel}
               onOpenInSlicer={openInSlicer}
+              engravingEnabled={engravingEnabled}
+              engraverLabel={engraverLabel}
+              onOpenInEngraving={openInEngraving}
               theme={theme}
             />
           ))}
+        </div>
+      )}
+      {hasMore && (
+        <div className="flex justify-center pt-2">
+          <button
+            className="px-4 py-2 rounded-md border border-panel-strong text-sm disabled:opacity-60"
+            onClick={loadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "Loading..." : "Load more"}
+          </button>
         </div>
       )}
       {previewItem && (
@@ -736,6 +841,9 @@ function AssetCard({
   slicerEnabled,
   slicerLabel,
   onOpenInSlicer,
+  engravingEnabled,
+  engraverLabel,
+  onOpenInEngraving,
   theme,
 }: {
   item: Asset;
@@ -759,6 +867,9 @@ function AssetCard({
   slicerEnabled: boolean;
   slicerLabel: string;
   onOpenInSlicer: (asset: Asset) => void;
+  engravingEnabled: boolean;
+  engraverLabel: string;
+  onOpenInEngraving: (asset: Asset) => void;
   theme: ResolvedTheme;
 }) {
   const [editingTags, setEditingTags] = useState(false);
@@ -876,6 +987,7 @@ function AssetCard({
   };
 
   const canOpenInSlicer = slicerEnabled && MODEL_EXTS.has(extOf(item.filename));
+  const canOpenInEngraving = engravingEnabled && ENGRAVING_EXTS.has(extOf(item.filename));
 
   return (
     <div className="rounded-lg border border-panel overflow-hidden bg-panel-soft">
@@ -917,14 +1029,27 @@ function AssetCard({
             )}
           </div>
         </div>
-        {canOpenInSlicer && (
-          <button
-            className="self-end text-xs px-2 py-1 rounded-md border border-panel-strong disabled:opacity-60"
-            onClick={() => onOpenInSlicer(item)}
-            disabled={downloading || bulkDownloading}
-          >
-            Open in {slicerLabel}
-          </button>
+        {(canOpenInSlicer || canOpenInEngraving) && (
+          <div className="flex flex-wrap gap-2 justify-end">
+            {canOpenInSlicer && (
+              <button
+                className="text-xs px-2 py-1 rounded-md border border-panel-strong disabled:opacity-60"
+                onClick={() => onOpenInSlicer(item)}
+                disabled={downloading || bulkDownloading}
+              >
+                Open in {slicerLabel}
+              </button>
+            )}
+            {canOpenInEngraving && (
+              <button
+                className="text-xs px-2 py-1 rounded-md border border-panel-strong disabled:opacity-60"
+                onClick={() => onOpenInEngraving(item)}
+                disabled={downloading || bulkDownloading}
+              >
+                Open in {engraverLabel}
+              </button>
+            )}
+          </div>
         )}
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold uppercase text-muted">
@@ -1058,6 +1183,7 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant, theme: Reso
       ? "w-full h-full object-cover"
       : "w-full h-full object-contain bg-panel-strong";
   const is3d = MODEL_EXTS.has(ext);
+  const isLightBurn = LIGHTBURN_EXTS.has(ext);
 
   if (variant === "card") {
     if (thumbUrl) {
@@ -1068,6 +1194,16 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant, theme: Reso
     }
     if (is3d) {
       return <ModelSnapshot url={assetUrl} ext={ext} assetId={asset.id} theme={theme} />;
+    }
+    if (isLightBurn) {
+      return (
+        <LightBurnPreview
+          url={assetUrl}
+          assetId={asset.id}
+          filename={asset.filename}
+          imgClass={imgClass}
+        />
+      );
     }
     return (
       <div className="flex items-center justify-center w-full h-full text-sm opacity-60">
@@ -1082,6 +1218,16 @@ function renderPreviewContent(asset: Asset, variant: PreviewVariant, theme: Reso
   if (thumbUrl || ext === "svg") {
     const src = thumbUrl || assetUrl;
     return <img src={src} alt={asset.filename} className={imgClass} />;
+  }
+  if (isLightBurn) {
+    return (
+      <LightBurnPreview
+        url={assetUrl}
+        assetId={asset.id}
+        filename={asset.filename}
+        imgClass={imgClass}
+      />
+    );
   }
   return (
     <div className="flex items-center justify-center w-full h-full text-sm opacity-60">

@@ -106,3 +106,12 @@ class AssetRename(BaseModel):
 
 class AssetFolderUpdate(BaseModel):
   folder_id: Optional[str] = None
+
+
+class MountImportSettings(BaseModel):
+  enabled: bool
+  copy_files: bool
+
+
+class MountImportSettingsOut(MountImportSettings):
+  path: Optional[str] = None

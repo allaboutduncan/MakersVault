@@ -91,6 +91,7 @@ export async function uploadEntriesToFolder(
   const failed: string[] = [];
   let uploaded = 0;
   let aborted = false;
+  const uploadedEntries: UploadEntry[] = [];
   const folderCache = new Map<string, string>();
   const baseKey = parentFolderId || "root";
 
@@ -132,6 +133,7 @@ export async function uploadEntriesToFolder(
     try {
       await uploadAsset(entry.file, { folder_id: targetFolderId || undefined });
       uploaded += 1;
+      uploadedEntries.push(entry);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         onUnauthorized?.();
@@ -143,5 +145,5 @@ export async function uploadEntriesToFolder(
       failed.push(message && message !== "Upload failed" ? `${entry.file.name} (${message})` : entry.file.name);
     }
   }
-  return { uploaded, failed };
+  return { uploaded, failed, uploadedEntries };
 }

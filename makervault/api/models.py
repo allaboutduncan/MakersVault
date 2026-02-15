@@ -20,3 +20,8 @@ class Asset(SQLModel, table=True):
   notes: Optional[str] = None
   folder_id: Optional[str] = None
   source_path: Optional[str] = None
+
+
+class AppConfig(SQLModel, table=True):
+  key: str = Field(primary_key=True)
+  value: str

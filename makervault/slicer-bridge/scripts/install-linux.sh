@@ -22,13 +22,14 @@ mkdir -p "$DESKTOP_DIR"
 DESKTOP_FILE="$DESKTOP_DIR/makersvault-slicer.desktop"
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
-Name=MakerVault Slicer Bridge
+Name=MakerVault Bridge
 Exec=$BIN_TARGET %u
 Type=Application
 Terminal=false
-MimeType=x-scheme-handler/makersvault-slicer;
+MimeType=x-scheme-handler/makersvault-slicer;x-scheme-handler/makersvault-engrave;
 EOF
 
 xdg-mime default makersvault-slicer.desktop x-scheme-handler/makersvault-slicer >/dev/null 2>&1 || true
+xdg-mime default makersvault-slicer.desktop x-scheme-handler/makersvault-engrave >/dev/null 2>&1 || true
 
 echo "Installed protocol handler at $BIN_TARGET"

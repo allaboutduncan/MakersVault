@@ -52,9 +52,10 @@ services:
       - AUTH_TOKEN_TTL=${AUTH_TOKEN_TTL:-43200}
       - FILE_STORAGE=/app/storage
       - DB_URL=sqlite:////app/data/app.db
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
       - IMPORT_MOUNT_PATH=${IMPORT_MOUNT_PATH:-/imports}
-      - IMPORT_MOUNT_EXTS=${IMPORT_MOUNT_EXTS:-stl,3mf,step,stp,obj,svg,png,jpg,jpeg,webp,bmp,zip}
+      - IMPORT_MOUNT_EXTS=${IMPORT_MOUNT_EXTS:-stl,3mf,step,stp,obj,svg,png,jpg,jpeg,webp,bmp,lbrn,lbrn2,zip}
       - IMPORT_MOUNT_INCLUDE_HIDDEN=${IMPORT_MOUNT_INCLUDE_HIDDEN:-false}
       - IMPORT_MOUNT_ON_STARTUP=${IMPORT_MOUNT_ON_STARTUP:-true}
     volumes:
@@ -62,15 +63,16 @@ services:
       - makersvault_db:/app/data
       - ${IMPORT_MOUNT_PATH_HOST:-/path/to/imports}:/imports:ro
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
 
   web:
     image: ${WEB_IMAGE:-shotgunwilly555/makersvault-web:latest}
     restart: unless-stopped
     environment:
-      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
-      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - VITE_API_URL=${VITE_API_URL:-}
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     ports:
@@ -95,12 +97,13 @@ docker run -d --name mv-api -p 8000:8000 \
   shotgunwilly555/makersvault-api:latest
 
 docker run -d --name mv-web -p 5173:5173 \
-  -e VITE_API_URL=http://localhost:8000 \
+  -e VITE_API_URL=http://10.0.0.160:8000 \
   shotgunwilly555/makersvault-web:latest
 
 ```
 
-<h3>Setting up the .env file</h3> <p>Setting up the .env file is important to define your environment variables. This file should be placed in the same folder as the docker-compose.yml file and named <strong>.env</strong>. An example .env file is shown below:</p>
+<h3>Setting up the .env file</h3>
+<p>Create a <strong>.env</strong> file in the same folder as <code>docker-compose.yml</code>. Start with this baseline:</p>
 
 ```yaml
 PUID=1000
@@ -109,38 +112,76 @@ API_IMAGE=shotgunwilly555/makersvault-api:latest
 WEB_IMAGE=shotgunwilly555/makersvault-web:latest
 FILE_STORAGE=/app/storage
 DB_URL=sqlite:///./app.db
-CORS_ORIGINS=http://localhost:5173
-VITE_API_URL=http://localhost:8000
-VITE_ALLOWED_HOSTS=localhost
+API_PORT=8000
+PUBLIC_URL=
+CORS_ORIGINS=
+VITE_API_URL=
+VITE_ALLOWED_HOSTS=
 AUTH_USERNAME=admin
 AUTH_PASSWORD=super-secret
 AUTH_SECRET=replace-with-random-secret
 AUTH_TOKEN_TTL=43200
+IMPORT_MOUNT_PATH=/imports
+IMPORT_MOUNT_PATH_HOST=/path/to/imports
+IMPORT_MOUNT_EXTS=stl,3mf,step,stp,obj,svg,png,jpg,jpeg,webp,bmp,lbrn,lbrn2,zip
+IMPORT_MOUNT_INCLUDE_HIDDEN=false
+IMPORT_MOUNT_ON_STARTUP=true
 ```
 
-<p>If you plan to run the Docker container on anything other than your local machine, you must update the .env file accordingly. For example, if you are running Makers Vault on a Linux server or behind a reverse proxy with a domain name:</p> <p><strong>NOTE:</strong> If you run Makers Vault on anything other than the local machine, you must change <code>CORS_ORIGINS</code>, <code>VITE_API_URL</code>, and <code>VITE_ALLOWED_HOSTS</code> to the appropriate address, otherwise login requests can fail or the Vite dev server will refuse the connection.</p>
+<p>For direct/LAN mode, set <code>VITE_API_URL</code> to a browser-reachable API URL (for example, <code>http://10.0.0.160:8000</code>).</p>
+
+<h3>Reverse Proxy Support (Any Provider)</h3>
+<p>Makers Vault is reverse-proxy agnostic. Nginx Proxy Manager, Traefik, Nginx, Caddy, HAProxy, and Apache all work.</p>
+<p><strong>Required routes:</strong></p>
+<ul>
+  <li><code>/</code> to <code>web:5173</code></li>
+  <li><code>/api/*</code> to <code>api:8000</code></li>
+</ul>
+<p><strong>Important:</strong> configure your proxy so public <code>/api/assets</code> reaches the API service route for <code>/assets</code>.</p>
+
+<h4>Recommended flow for proxied setups</h4>
+<p>Start containers:</p>
+
+```bash
+docker compose -f docker-compose.yml up -d
+```
+
+<ol>
+  <li>Bring the stack up with Docker Compose.</li>
+  <li>Configure your reverse proxy routes (<code>/</code> and <code>/api/*</code>).</li>
+  <li>Set <code>PUBLIC_URL</code> in <code>.env</code> (for example, <code>https://makersvault.example.com</code>) and restart.</li>
+  <li>Open Makers Vault at your public domain.</li>
+</ol>
+<p>When served on standard proxy ports (80/443), Makers Vault automatically calls the API at <code>&lt;current-origin&gt;/api</code>.</p>
+
+<h4>Environment values when using a reverse proxy</h4>
+<ul>
+  <li>Set <code>PUBLIC_URL</code> to your public domain URL.</li>
+  <li>Leave <code>VITE_API_URL</code> empty unless you intentionally want a non-default API target.</li>
+  <li>Set <code>CORS_ORIGINS</code> as needed for direct/LAN access or additional origins.</li>
+</ul>
+<p>Example:</p>
 
 ```yaml
-PUID=1000
-PGID=1000
-API_IMAGE=shotgunwilly555/makersvault-api:latest
-WEB_IMAGE=shotgunwilly555/makersvault-web:latest
-FILE_STORAGE=/app/storage
-DB_URL=sqlite:///./app.db
-CORS_ORIGINS=http://10.0.0.160:5173,https://makersvault-local.duckdns.org  # comma separate local + proxy entry points
-VITE_API_URL=https://makersvault-local.duckdns.org  # browser should call the public/proxied URL
-VITE_ALLOWED_HOSTS=10.0.0.160,makersvault-local.duckdns.org  # hostnames only; keep in sync with CORS_ORIGINS
-AUTH_USERNAME=admin
-AUTH_PASSWORD=super-secret
-AUTH_SECRET=replace-with-random-secret  # recommended to use a random generated string
-AUTH_TOKEN_TTL=43200
+PUBLIC_URL=https://makersvault.example.com
+CORS_ORIGINS=https://makersvault.example.com,http://10.0.0.160:5173
+VITE_API_URL=
+VITE_ALLOWED_HOSTS=
 ```
-<p><strong>Tip:</strong> <code>CORS_ORIGINS</code> accepts a comma-separated list so you can keep both your direct access URL (e.g. <code>http://10.0.0.160:5173</code>) and reverse proxy domain (e.g. <code>https://makersvault-local.duckdns.org</code>) in one .env file without rewriting it when you switch.</p>
-<p>The Vite dev server now reads <code>VITE_ALLOWED_HOSTS</code> and will fall back to <code>CORS_ORIGINS</code> (plus the hostname from <code>VITE_API_URL</code>) if it is not provided, so host checks stay in sync with the API CORS settings without creating a manual <code>vite.config.js</code> inside the container.</p>
-<p><strong>Running as non-root:</strong> set <code>PUID</code> and <code>PGID</code> to your host user/group IDs (defaults to 1000). The containers create a matching user at startup so volume mounts stay writable and <code>whoami</code> inside the container reports that user instead of root.</p>
-<p><strong>Keeping the API internal:</strong> the web service must remain published for browsers, but the API port only needs to be published when you call it directly. When you front both services with a reverse proxy, remove the <code>ports</code> section from <code>api</code> and add <code>expose: ["8000"]</code> so it is reachable only on the Docker network.</p>
 
-<p>By default, the username and password will be defined in the .env file — it is recommended to change these credentials. All other variables can be modified based on user preference. When mapping ports in the docker-compose file, ensure the ports match the values set in the .env file.</p>
+<p><strong>Running as non-root:</strong> set <code>PUID</code> and <code>PGID</code> to your host user/group IDs (defaults to 1000). Containers create a matching user at startup so volume mounts stay writable.</p>
+<p><strong>Keeping API internal:</strong> when everything is behind a reverse proxy, you can remove <code>ports</code> from <code>api</code> and use <code>expose: ["8000"]</code> instead.</p>
+
+<h4>Quick troubleshooting</h4>
+<ul>
+  <li>Login fails with CORS error: add the public domain to <code>CORS_ORIGINS</code>.</li>
+  <li>UI loads but API calls 404 under <code>/api</code>: fix proxy mapping so <code>/api/*</code> reaches API routes correctly.</li>
+  <li>LetsEncrypt HTTP-01 challenge fails and returns app HTML: make sure external port 80 points to your reverse proxy (not directly to Makers Vault).</li>
+  <li>Public login fails while LAN/direct works: clear/avoid hardcoded private-IP <code>VITE_API_URL</code> for proxied access.</li>
+</ul>
+
+<p>Change the default credentials in <code>.env</code> before exposing the app publicly.</p>
+
 <h2>Contributing</h2> 
 <p>Contributions are always welcome, whether it be bug fixes or feature improvements. For large changes, please open a discussion first!</p> <h2>Feature Requests and Bug Reporting</h2> <p>For bug reports or feature improvement requests, please open an issue or start a discussion thread.</p> 
 <h2>Features, UI Walkthrough, and Supported File Types</h2> 
@@ -303,7 +344,7 @@ In the future there are plans to add support for more websites, but in this curr
 <a href="https://github.com/VincentCinque/MakersVault/tree/main/makervault/slicer-bridge">The Slicer Bridge can be downloaded here.</a>
 
 <h2>Settings</h2>
-<p>The settings page can be accessed from the settings button at the bottom left of the page. The settings sub-menus encompasses: Open in Slicer settings, themes, and Import settings </p>
+<p>The settings page is available from the button at the bottom-left of the app. Sub-menus include Open in Slicer, Reverse Proxy, Themes, and Imports.</p>
 <h3>Themes</h3>
 
 <img width="4405" height="2189" alt="Settings" src="https://github.com/user-attachments/assets/87eb158a-d2d3-48ce-a4ec-2a6e80955c99" />

@@ -1,4 +1,5 @@
 import { appendTokenToUrl, authHeaders } from "./auth";
+import { loadSettings } from "./settings";
 
 export class UnauthorizedError extends Error {
   constructor(message = "Unauthorized") {
@@ -65,42 +66,122 @@ export type ImportZipResult = {
   failed: string[];
 };
 
+export type ListAssetsResult = {
+  items: Asset[];
+  hasMore: boolean;
+  nextOffset?: number;
+};
+
+export type MountImportSettings = {
+  enabled: boolean;
+  copy_files: boolean;
+  path?: string | null;
+};
+
+function normalizePublicUrl(raw: string): string | null {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/\/+$/, "");
+  }
+  const protocol = typeof window !== "undefined" ? window.location.protocol : "http:";
+  return `${protocol}//${trimmed}`.replace(/\/+$/, "");
+}
+
+function apiBaseFromPublicUrl(raw: string): string | null {
+  const normalized = normalizePublicUrl(raw);
+  if (!normalized) return null;
+  if (/\/api\/?$/i.test(normalized)) {
+    return normalized.replace(/\/+$/, "");
+  }
+  return `${normalized}/api`;
+}
+
+function apiBaseFromSettings(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const settings = loadSettings();
+    return apiBaseFromPublicUrl(settings.network?.publicUrl || "");
+  } catch {
+    return null;
+  }
+}
+
+function isLocalHostName(hostname: string) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
 // API base URL resolution (browser-reachable)
 function resolveApiBase(): string {
+  const settingsBase = apiBaseFromSettings();
+  if (settingsBase) return settingsBase;
   const envUrl = (import.meta.env.VITE_API_URL as string | undefined) || "";
   const isAbs = /^(https?:)?\/\//i.test(envUrl);
-  if (envUrl) {
-    if (isAbs) return envUrl.replace(/\/$/, "");
-    // If someone sets just a port like ":8000" or "8000"
-    const port = envUrl.replace(/^:?/, "");
-    const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-    return `http://${host}:${port}`.replace(/\/$/, "");
-  }
-  const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  const port = typeof window !== "undefined" ? window.location.port : "";
-  const protocol = typeof window !== "undefined" ? window.location.protocol : "http:";
+  const hasWindow = typeof window !== "undefined";
+  const host = hasWindow ? window.location.hostname : "localhost";
+  const port = hasWindow ? window.location.port : "";
+  const protocol = hasWindow ? window.location.protocol : "http:";
   const isStandardPort = port === "" || port === "80" || port === "443";
-  const isLocalHost = host === "localhost" || host === "127.0.0.1";
-  // When served behind a reverse proxy on 80/443, assume the API is on the same origin.
-  if (!isLocalHost && isStandardPort && typeof window !== "undefined") {
-    return `${protocol}//${window.location.host}`.replace(/\/$/, "");
+  const isLocalHost = isLocalHostName(host);
+  const isProxyContext = hasWindow && !isLocalHost && isStandardPort;
+
+  // Behind a reverse proxy on 80/443, default to same-origin /api.
+  // This avoids brittle private-IP env defaults breaking public-domain logins.
+  if (isProxyContext && hasWindow) {
+    if (envUrl && isAbs) {
+      try {
+        const absolute = envUrl.startsWith("//") ? `${protocol}${envUrl}` : envUrl;
+        const parsed = new URL(absolute);
+        if (parsed.hostname === host) {
+          return absolute.replace(/\/$/, "");
+        }
+      } catch {
+        // Ignore malformed env URL and keep proxy-safe default below.
+      }
+    }
+    return `${window.location.origin}/api`.replace(/\/$/, "");
   }
+
+  if (envUrl) {
+    if (isAbs) {
+      return envUrl.replace(/\/$/, "");
+    } else if (!isProxyContext) {
+      // If someone sets just a port like ":8000" or "8000"
+      const portOnly = envUrl.replace(/^:?/, "");
+      return `http://${host}:${portOnly}`.replace(/\/$/, "");
+    }
+  }
+
   // Default: same host, API on 8000
   return `http://${host}:8000`;
 }
 
-const API = resolveApiBase();
+function apiBase(): string {
+  return resolveApiBase();
+}
 
-export async function listAssets(params: { q?: string; tags?: string[]; folder_id?: string } = {}): Promise<Asset[]> {
+export async function listAssets(params: {
+  q?: string;
+  tags?: string[];
+  folder_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListAssetsResult> {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
   if (params.folder_id) qs.set("folder_id", params.folder_id);
-  const res = await fetch(`${API}/assets?${qs.toString()}`, {
+  if (typeof params.limit === "number") qs.set("limit", String(params.limit));
+  if (typeof params.offset === "number") qs.set("offset", String(params.offset));
+  const res = await fetch(`${apiBase()}/assets?${qs.toString()}`, {
     headers: authHeaders(),
   });
   assertOk(res, "Failed to list assets");
-  return res.json();
+  const items = await res.json();
+  const hasMore = (res.headers.get("X-Has-More") || "").toLowerCase() === "true";
+  const nextOffsetRaw = res.headers.get("X-Next-Offset");
+  const nextOffset = nextOffsetRaw ? Number(nextOffsetRaw) : undefined;
+  return { items, hasMore, nextOffset };
 }
 
 export async function uploadAsset(
@@ -114,7 +195,7 @@ export async function uploadAsset(
   if (opts.notes) fd.set("notes", opts.notes);
   if (opts.tags && opts.tags.length) fd.set("tags", opts.tags.join(","));
   if (opts.folder_id) fd.set("folder_id", opts.folder_id);
-  const res = await fetch(`${API}/upload`, {
+  const res = await fetch(`${apiBase()}/upload`, {
     method: "POST",
     body: fd,
     headers: authHeaders(),
@@ -139,7 +220,7 @@ export async function importFromLink(payload: {
   makerworld_cookie?: string;
   thingiverse_cookie?: string;
 }) {
-  const res = await fetch(`${API}/import`, {
+  const res = await fetch(`${apiBase()}/import`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -170,7 +251,7 @@ export async function inspectImportLink(payload: {
   makerworld_cookie?: string;
   thingiverse_cookie?: string;
 }): Promise<ImportInspectInfo> {
-  const res = await fetch(`${API}/import/inspect`, {
+  const res = await fetch(`${apiBase()}/import/inspect`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -195,7 +276,7 @@ export async function listImportZipEntries(payload: {
   makerworld_cookie?: string;
   thingiverse_cookie?: string;
 }): Promise<{ filename: string; entries: ZipEntryInfo[] }> {
-  const res = await fetch(`${API}/import/zip/entries`, {
+  const res = await fetch(`${apiBase()}/import/zip/entries`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -221,7 +302,7 @@ export async function importZipFromLink(payload: {
   makerworld_cookie?: string;
   thingiverse_cookie?: string;
 }): Promise<ImportZipResult> {
-  const res = await fetch(`${API}/import/zip`, {
+  const res = await fetch(`${apiBase()}/import/zip`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -237,7 +318,7 @@ export async function importZipFromLink(payload: {
 }
 
 export async function setTags(id: string, tags: string[]) {
-  const res = await fetch(`${API}/asset/${id}/tags`, {
+  const res = await fetch(`${apiBase()}/asset/${id}/tags`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ tags }),
@@ -247,7 +328,7 @@ export async function setTags(id: string, tags: string[]) {
 }
 
 export async function updateAssetMeta(id: string, payload: { title?: string | null; notes?: string | null }) {
-  const res = await fetch(`${API}/asset/${id}/meta`, {
+  const res = await fetch(`${apiBase()}/asset/${id}/meta`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -257,13 +338,13 @@ export async function updateAssetMeta(id: string, payload: { title?: string | nu
 }
 
 export async function deleteAsset(id: string) {
-  const res = await fetch(`${API}/asset/${id}`, { method: "DELETE", headers: authHeaders() });
+  const res = await fetch(`${apiBase()}/asset/${id}`, { method: "DELETE", headers: authHeaders() });
   assertOk(res, "Delete asset failed");
   return res.json();
 }
 
 export async function renameAsset(id: string, filename: string) {
-  const res = await fetch(`${API}/asset/${id}/rename`, {
+  const res = await fetch(`${apiBase()}/asset/${id}/rename`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ filename }),
@@ -273,7 +354,7 @@ export async function renameAsset(id: string, filename: string) {
 }
 
 export async function updateAssetFolder(id: string, folder_id: string | null) {
-  const res = await fetch(`${API}/asset/${id}/folder`, {
+  const res = await fetch(`${apiBase()}/asset/${id}/folder`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ folder_id }),
@@ -285,7 +366,7 @@ export async function updateAssetFolder(id: string, folder_id: string | null) {
 export function fileUrl(rel: string) {
   // API returns relative URLs. Join with API base.
   if (!rel) return rel;
-  return appendTokenToUrl(`${API}${rel}`);
+  return appendTokenToUrl(`${apiBase()}${rel}`);
 }
 
 // Folders -------------------------------------------------------
@@ -293,13 +374,13 @@ export function fileUrl(rel: string) {
 export type Folder = { id: string; name: string; tags: string[]; parent_id?: string | null };
 
 export async function listFolders(): Promise<Folder[]> {
-  const res = await fetch(`${API}/folders`, { headers: authHeaders() });
+  const res = await fetch(`${apiBase()}/folders`, { headers: authHeaders() });
   assertOk(res, "Failed to list folders");
   return res.json();
 }
 
 export async function createFolder(name: string, tags: string[] = [], parent_id?: string | null) {
-  const res = await fetch(`${API}/folders`, {
+  const res = await fetch(`${apiBase()}/folders`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, tags, parent_id }),
@@ -309,7 +390,7 @@ export async function createFolder(name: string, tags: string[] = [], parent_id?
 }
 
 export async function updateFolder(id: string, name: string, tags: string[], parent_id?: string | null) {
-  const res = await fetch(`${API}/folder/${id}`, {
+  const res = await fetch(`${apiBase()}/folder/${id}`, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, tags, parent_id }),
@@ -319,13 +400,13 @@ export async function updateFolder(id: string, name: string, tags: string[], par
 }
 
 export async function deleteFolder(id: string) {
-  const res = await fetch(`${API}/folder/${id}`, { method: "DELETE", headers: authHeaders() });
+  const res = await fetch(`${apiBase()}/folder/${id}`, { method: "DELETE", headers: authHeaders() });
   assertOk(res, "Delete folder failed");
   return res.json();
 }
 
 export async function downloadZip(opts: { asset_ids?: string[]; tag?: string; folder_id?: string; filename?: string }) {
-  const res = await fetch(`${API}/download/zip`, {
+  const res = await fetch(`${apiBase()}/download/zip`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(opts),
@@ -335,7 +416,7 @@ export async function downloadZip(opts: { asset_ids?: string[]; tag?: string; fo
 }
 
 export async function downloadFolderZip(folder_id: string) {
-  const res = await fetch(`${API}/folder/${folder_id}/download`, { headers: authHeaders() });
+  const res = await fetch(`${apiBase()}/folder/${folder_id}/download`, { headers: authHeaders() });
   assertOk(res, "Folder download failed");
   return res;
 }
@@ -344,7 +425,7 @@ export type HealthInfo = { ok: boolean; auth_required: boolean };
 
 export async function apiHealth(): Promise<HealthInfo | null> {
   try {
-    const res = await fetch(`${API}/health`, { cache: "no-store" });
+    const res = await fetch(`${apiBase()}/health`, { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     return {
@@ -356,10 +437,12 @@ export async function apiHealth(): Promise<HealthInfo | null> {
   }
 }
 
-export const API_BASE = API;
+export function getApiBase() {
+  return apiBase();
+}
 
 export async function login(username: string, password: string): Promise<{ token: string; expires_in: number }> {
-  const res = await fetch(`${API}/login`, {
+  const res = await fetch(`${apiBase()}/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -378,10 +461,29 @@ export async function login(username: string, password: string): Promise<{ token
 }
 
 export async function refreshToken(): Promise<{ token: string; expires_in: number }> {
-  const res = await fetch(`${API}/refresh`, {
+  const res = await fetch(`${apiBase()}/refresh`, {
     method: "POST",
     headers: authHeaders(),
   });
   assertOk(res, "Token refresh failed");
+  return res.json();
+}
+
+export async function getMountImportSettings(): Promise<MountImportSettings> {
+  const res = await fetch(`${apiBase()}/settings/mount-import`, { headers: authHeaders() });
+  assertOk(res, "Failed to load mount import settings");
+  return res.json();
+}
+
+export async function updateMountImportSettings(payload: {
+  enabled: boolean;
+  copy_files: boolean;
+}): Promise<MountImportSettings> {
+  const res = await fetch(`${apiBase()}/settings/mount-import`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  assertOk(res, "Failed to update mount import settings");
   return res.json();
 }

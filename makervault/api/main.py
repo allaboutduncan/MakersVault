@@ -1,4 +1,4 @@
-from fastapi import BackgroundTasks, Depends, FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, UploadFile, File, Form, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 from sqlmodel import SQLModel, Session, select
@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 import tempfile
 import threading
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import json
 import os
 import jwt
@@ -24,13 +24,19 @@ from auth import (
     require_auth,
 )
 from asset_service import asset_path, save_thumb
-from config import MOUNT_IMPORT_ENABLED, MOUNT_IMPORT_PATH
-from db import STORAGE, THUMBS, engine, ensure_folder_parent_column, ensure_asset_source_path_column
+from config import MOUNT_IMPORT_ENABLED, MOUNT_IMPORT_PATH, MOUNT_IMPORT_COPY
+from db import STORAGE, THUMBS, engine, ensure_folder_parent_column, ensure_asset_source_path_column, ensure_asset_indexes
 from file_utils import build_import_filename, mime_from_content_type, sanitize_filename
 from folder_service import validate_parent_folder
 from import_service import download_import_to_temp, import_asset_from_url, open_import_response
 from mount_import import scan_mount_imports
 from models import Asset, Folder
+from settings_service import (
+    get_mount_import_copy,
+    get_mount_import_enabled,
+    set_mount_import_copy,
+    set_mount_import_enabled,
+)
 from schemas import (
     AssetOut,
     FolderIn,
@@ -48,6 +54,8 @@ from schemas import (
     ImportZipEntriesOut,
     ImportZipExtractRequest,
     ImportZipResult,
+    MountImportSettings,
+    MountImportSettingsOut,
 )
 from zip_service import extract_zip_entries_to_assets, list_zip_entries
 from url_utils import normalize_import_url
@@ -55,7 +63,35 @@ from url_utils import normalize_import_url
 app = FastAPI(title="MakerVault API")
 
 
-origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+def normalize_origin(raw: str) -> Optional[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def resolve_cors_origins() -> str:
+    raw = os.getenv("CORS_ORIGINS")
+    if raw:
+        return raw
+    candidates: List[str] = []
+    for name in ("PUBLIC_URL", "VITE_API_URL"):
+        origin = normalize_origin(os.getenv(name, ""))
+        if origin:
+            candidates.append(origin)
+    if candidates:
+        # Preserve order, remove duplicates.
+        return ",".join(dict.fromkeys(candidates))
+    return "http://localhost:5173"
+
+
+origins_env = resolve_cors_origins()
 origins = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -63,6 +99,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Has-More", "X-Next-Offset"],
 )
 
 
@@ -71,11 +108,33 @@ def on_startup():
     SQLModel.metadata.create_all(engine)
     ensure_folder_parent_column()
     ensure_asset_source_path_column()
-    if MOUNT_IMPORT_PATH and MOUNT_IMPORT_ENABLED:
+    ensure_asset_indexes()
+    if MOUNT_IMPORT_PATH and get_mount_import_enabled(MOUNT_IMPORT_ENABLED):
         threading.Thread(target=scan_mount_imports, daemon=True).start()
 
 
 # Utilities ------------------------------------------------------
+
+def is_mount_source_allowed(path: Path) -> bool:
+    if not MOUNT_IMPORT_PATH:
+        return False
+    try:
+        root = Path(MOUNT_IMPORT_PATH).resolve()
+        candidate = path.resolve()
+    except Exception:
+        return False
+    return candidate == root or root in candidate.parents
+
+
+def resolve_asset_file(asset: Asset) -> Optional[Path]:
+    p = STORAGE / asset.id / asset.filename
+    if p.exists():
+        return p
+    if asset.source_path:
+        source = Path(asset.source_path)
+        if source.exists() and is_mount_source_allowed(source):
+            return source
+    return None
 
 
 def folder_to_out(f: Folder) -> "FolderOut":
@@ -109,8 +168,8 @@ def arcname_for_asset(asset: Asset, folder_label_map: Optional[dict] = None) -> 
 def zip_assets_response(assets: List[Asset], download_name: str, background: BackgroundTasks, folder_label_map: Optional[dict] = None):
     files: List[tuple[str, Path]] = []
     for a in assets:
-        path = asset_path(a.id, a.filename)
-        if not path.exists():
+        path = resolve_asset_file(a)
+        if not path:
             continue
         files.append((arcname_for_asset(a, folder_label_map), path))
     if not files:
@@ -133,6 +192,26 @@ def zip_assets_response(assets: List[Asset], download_name: str, background: Bac
 @app.get("/health")
 def health():
     return {"ok": True, "auth_required": AUTH_ENABLED}
+
+
+@app.get("/settings/mount-import", response_model=MountImportSettingsOut)
+def get_mount_import_settings(_: Optional[str] = Depends(require_auth)):
+    return MountImportSettingsOut(
+        enabled=get_mount_import_enabled(MOUNT_IMPORT_ENABLED),
+        copy_files=get_mount_import_copy(MOUNT_IMPORT_COPY),
+        path=MOUNT_IMPORT_PATH or None,
+    )
+
+
+@app.post("/settings/mount-import", response_model=MountImportSettingsOut)
+def update_mount_import_settings(body: MountImportSettings, _: Optional[str] = Depends(require_auth)):
+    set_mount_import_enabled(body.enabled)
+    set_mount_import_copy(body.copy_files)
+    return MountImportSettingsOut(
+        enabled=get_mount_import_enabled(MOUNT_IMPORT_ENABLED),
+        copy_files=get_mount_import_copy(MOUNT_IMPORT_COPY),
+        path=MOUNT_IMPORT_PATH or None,
+    )
 
 
 @app.post("/login", response_model=LoginResponse)
@@ -268,15 +347,17 @@ def import_zip_entries(body: ImportZipExtractRequest, _: Optional[str] = Depends
 
 @app.get("/file/{asset_id}/{name}")
 def get_file(asset_id: str, name: str, _: Optional[str] = Depends(require_auth)):
-    p = asset_path(asset_id, name)
-    if not p.exists():
-        raise HTTPException(404)
-
     media_type: Optional[str] = None
     with Session(engine) as s:
         a = s.get(Asset, asset_id)
         if a:
             media_type = a.mime
+            p = resolve_asset_file(a)
+        else:
+            p = None
+
+    if not p or not p.exists():
+        raise HTTPException(404)
 
     return FileResponse(
         p,
@@ -295,9 +376,12 @@ def get_thumb(asset_id: str, _: Optional[str] = Depends(require_auth)):
 
 @app.get("/assets", response_model=List[AssetOut])
 def list_assets(
+    response: Response,
     q: Optional[str] = None,
     tags: Optional[str] = Query(default=None, description="Comma-separated tags"),
     folder_id: Optional[str] = None,
+    limit: Optional[int] = Query(default=None, ge=1, le=1000),
+    offset: Optional[int] = Query(default=None, ge=0),
     _: Optional[str] = Depends(require_auth),
 ):
     with Session(engine) as s:
@@ -307,15 +391,25 @@ def list_assets(
             stmt = stmt.where((Asset.filename.like(qlike)) | (Asset.title.like(qlike)) | (Asset.notes.like(qlike)))
         if folder_id:
             stmt = stmt.where(Asset.folder_id == folder_id)
+        tag_filter = [t.strip() for t in (tags or "").split(",") if t.strip()]
+        for tag in tag_filter:
+            stmt = stmt.where(Asset.tags_json.like(f'%"{tag}"%'))
+        stmt = stmt.order_by(Asset.filename, Asset.id)
+        if limit is not None:
+            stmt = stmt.limit(limit + 1)
+            if offset:
+                stmt = stmt.offset(offset)
         assets = list(s.exec(stmt))
 
-    tag_filter = set((tags or "").split(",")) - {""}
-    out: List[AssetOut] = []
-    for a in assets:
-        atags = set(json.loads(a.tags_json or "[]"))
-        if tag_filter and not tag_filter.issubset(atags):
-            continue
-        out.append(to_out(a))
+    has_more = False
+    if limit is not None and len(assets) > limit:
+        has_more = True
+        assets = assets[:limit]
+    if limit is not None and response is not None:
+        response.headers["X-Has-More"] = "true" if has_more else "false"
+        response.headers["X-Next-Offset"] = str((offset or 0) + len(assets))
+
+    out: List[AssetOut] = [to_out(a) for a in assets]
     return out
 
 
@@ -393,8 +487,10 @@ def rename_asset(asset_id: str, body: AssetRename, _: Optional[str] = Depends(re
         a = s.get(Asset, asset_id)
         if not a:
             raise HTTPException(404)
-        old_path = asset_path(asset_id, a.filename)
+        old_path = STORAGE / asset_id / a.filename
         if not old_path.exists():
+            if a.source_path:
+                raise HTTPException(400, "Renaming is not supported for mounted files.")
             raise HTTPException(404, "File not found on disk")
         root, ext = os.path.splitext(os.path.basename(a.filename))
         proposed_root, proposed_ext = os.path.splitext(os.path.basename(new_name))
@@ -402,7 +498,7 @@ def rename_asset(asset_id: str, body: AssetRename, _: Optional[str] = Depends(re
         if not final_ext:
             raise HTTPException(400, "Filename must include an extension")
         new_name_only = (proposed_root or root) + final_ext
-        new_path = asset_path(asset_id, new_name_only)
+        new_path = STORAGE / asset_id / new_name_only
         if new_name_only == a.filename:
             return to_out(a)
         if new_path.exists():

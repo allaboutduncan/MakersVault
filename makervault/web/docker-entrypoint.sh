@@ -6,6 +6,20 @@ PGID=${PGID:-1000}
 APP_USER=appuser
 APP_GROUP=appgroup
 
+# Reverse proxy quickstart: derive defaults from PUBLIC_URL when provided.
+if [ -n "${PUBLIC_URL:-}" ]; then
+  PUBLIC_URL="${PUBLIC_URL%/}"
+  if [ -z "${VITE_API_URL:-}" ]; then
+    export VITE_API_URL="${PUBLIC_URL}/api"
+  fi
+  if [ -z "${CORS_ORIGINS:-}" ]; then
+    export CORS_ORIGINS="${PUBLIC_URL}"
+  fi
+  if [ -z "${VITE_ALLOWED_HOSTS:-}" ]; then
+    export VITE_ALLOWED_HOSTS="${PUBLIC_URL}"
+  fi
+fi
+
 # Reuse an existing user if the requested UID is already present (e.g., the base
 # image ships with a user at UID 1000). This avoids adduser failing with
 # "uid in use" while still honoring PUID.

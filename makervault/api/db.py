@@ -30,3 +30,11 @@ def ensure_asset_source_path_column() -> None:
       return
     if "source_path" not in cols:
       conn.exec_driver_sql("ALTER TABLE asset ADD COLUMN source_path TEXT")
+
+
+def ensure_asset_indexes() -> None:
+  """Create indexes that keep large asset libraries responsive."""
+  with engine.connect() as conn:
+    conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_asset_filename ON asset(filename)")
+    conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_asset_folder_id ON asset(folder_id)")
+    conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_asset_size ON asset(size)")

@@ -36,20 +36,30 @@ func installSelf() (string, error) {
 		}
 	}
 
-	root := `HKCU\Software\Classes\makersvault-slicer`
-	if err := regAdd(root, "/ve", "/t", "REG_SZ", "/d", "URL:MakerVault Slicer Bridge", "/f"); err != nil {
+	if err := registerProtocol("makersvault-slicer", "MakerVault Slicer Bridge", targetExe); err != nil {
 		return "", err
 	}
-	if err := regAdd(root, "/v", "URL Protocol", "/t", "REG_SZ", "/d", "1", "/f"); err != nil {
-		return "", err
-	}
-	commandKey := root + `\shell\open\command`
-	command := fmt.Sprintf("\"%s\" \"%%1\"", targetExe)
-	if err := regAdd(commandKey, "/ve", "/t", "REG_SZ", "/d", command, "/f"); err != nil {
+	if err := registerProtocol("makersvault-engrave", "MakerVault Engraving Bridge", targetExe); err != nil {
 		return "", err
 	}
 
 	return targetExe, nil
+}
+
+func registerProtocol(scheme, label, targetExe string) error {
+	root := fmt.Sprintf(`HKCU\Software\Classes\%s`, scheme)
+	if err := regAdd(root, "/ve", "/t", "REG_SZ", "/d", "URL:"+label, "/f"); err != nil {
+		return err
+	}
+	if err := regAdd(root, "/v", "URL Protocol", "/t", "REG_SZ", "/d", "1", "/f"); err != nil {
+		return err
+	}
+	commandKey := root + `\shell\open\command`
+	command := fmt.Sprintf("\"%s\" \"%%1\"", targetExe)
+	if err := regAdd(commandKey, "/ve", "/t", "REG_SZ", "/d", command, "/f"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func regAdd(key string, args ...string) error {

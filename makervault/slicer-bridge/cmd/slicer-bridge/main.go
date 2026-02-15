@@ -26,7 +26,13 @@ type Config struct {
 	DownloadDir string                  `json:"download_dir,omitempty"`
 	LogFile     string                  `json:"log_file,omitempty"`
 	Slicers     map[string]SlicerConfig `json:"slicers,omitempty"`
+	Engravers   map[string]SlicerConfig `json:"engravers,omitempty"`
 }
+
+const (
+	slicerScheme  = "makersvault-slicer"
+	engraveScheme = "makersvault-engrave"
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -36,8 +42,8 @@ func main() {
 			printUsage()
 			return
 		}
-		fmt.Printf("Installed MakerVault Slicer Bridge at %s\n", target)
-		fmt.Println("You can now use Open in Slicer from MakerVault.")
+		fmt.Printf("Installed MakerVault Bridge at %s\n", target)
+		fmt.Println("You can now use Open in Slicer and Open in Engraving Software from MakerVault.")
 		return
 	}
 
@@ -52,8 +58,8 @@ func main() {
 			fmt.Printf("Install failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Installed MakerVault Slicer Bridge at %s\n", target)
-		fmt.Println("You can now use Open in Slicer from MakerVault.")
+		fmt.Printf("Installed MakerVault Bridge at %s\n", target)
+		fmt.Println("You can now use Open in Slicer and Open in Engraving Software from MakerVault.")
 		return
 	}
 
@@ -69,6 +75,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  slicer-bridge --install")
 	fmt.Println("  slicer-bridge <makersvault-slicer://open?...>")
+	fmt.Println("  slicer-bridge <makersvault-engrave://open?...>")
 }
 
 func handleProtocol(raw string, cfg Config) error {
@@ -76,7 +83,16 @@ func handleProtocol(raw string, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("parse url: %w", err)
 	}
-	if parsed.Scheme != "makersvault-slicer" {
+	tool := ""
+	idParam := ""
+	switch parsed.Scheme {
+	case slicerScheme:
+		tool = "slicer"
+		idParam = "slicer"
+	case engraveScheme:
+		tool = "engraver"
+		idParam = "engraver"
+	default:
 		return fmt.Errorf("unexpected scheme: %s", parsed.Scheme)
 	}
 
@@ -108,8 +124,11 @@ func handleProtocol(raw string, cfg Config) error {
 	}
 	filename = sanitizeFilename(filename)
 
-	slicerID := strings.ToLower(strings.TrimSpace(q.Get("slicer")))
-	log.Printf("open request slicer=%s url=%s filename=%s", slicerID, redactURL(downloadURL), filename)
+	appID := strings.ToLower(strings.TrimSpace(q.Get(idParam)))
+	if appID == "" && tool == "engraver" {
+		appID = strings.ToLower(strings.TrimSpace(q.Get("slicer")))
+	}
+	log.Printf("open request tool=%s app=%s url=%s filename=%s", tool, appID, redactURL(downloadURL), filename)
 
 	downloadDir := resolveDownloadDir(cfg)
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
@@ -121,16 +140,22 @@ func handleProtocol(raw string, cfg Config) error {
 		return err
 	}
 
-	if slicerID == "" || slicerID == "other" {
+	if appID == "" || appID == "other" {
 		return openWithDefault(targetPath)
 	}
 
-	cmd, args := resolveSlicerCommand(slicerID, cfg)
+	var cmd string
+	var args []string
+	if tool == "engraver" {
+		cmd, args = resolveEngraverCommand(appID, cfg)
+	} else {
+		cmd, args = resolveSlicerCommand(appID, cfg)
+	}
 	if cmd == "" {
 		return openWithDefault(targetPath)
 	}
 
-	log.Printf("launch slicer command=%s args=%v", cmd, args)
+	log.Printf("launch %s command=%s args=%v", tool, cmd, args)
 	return launchCommand(cmd, args, targetPath)
 }
 
@@ -154,7 +179,10 @@ func setupLogging(cfg Config, cfgDir string) {
 func loadConfig() (Config, string) {
 	cfgDir := configDir()
 	cfgPath := filepath.Join(cfgDir, "config.json")
-	cfg := Config{Slicers: map[string]SlicerConfig{}}
+	cfg := Config{
+		Slicers:   map[string]SlicerConfig{},
+		Engravers: map[string]SlicerConfig{},
+	}
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return cfg, cfgDir
@@ -164,6 +192,9 @@ func loadConfig() (Config, string) {
 	}
 	if cfg.Slicers == nil {
 		cfg.Slicers = map[string]SlicerConfig{}
+	}
+	if cfg.Engravers == nil {
+		cfg.Engravers = map[string]SlicerConfig{}
 	}
 	return cfg, cfgDir
 }
@@ -266,17 +297,44 @@ func resolveSlicerCommand(id string, cfg Config) (string, []string) {
 
 	switch runtime.GOOS {
 	case "windows":
-		return findWindowsCommand(id), nil
+		return findWindowsCommand(id, windowsCandidates()), nil
 	case "linux":
-		return findLinuxCommand(id), nil
+		return findLinuxCommand(id, linuxCandidates()), nil
 	default:
 		return "", nil
 	}
 }
 
-func findWindowsCommand(id string) string {
-	candidates := windowsCandidates()[id]
-	if len(candidates) == 0 {
+func resolveEngraverCommand(id string, cfg Config) (string, []string) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" || id == "other" {
+		return "", nil
+	}
+
+	if cfg.Engravers != nil {
+		if sc, ok := cfg.Engravers[id]; ok && sc.Command != "" {
+			return sc.Command, sc.Args
+		}
+	}
+
+	envKey := "MAKERVAULT_ENGRAVER_" + strings.ToUpper(strings.ReplaceAll(id, "-", "_"))
+	if val := strings.TrimSpace(os.Getenv(envKey)); val != "" {
+		return val, nil
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		return findWindowsCommand(id, engraverWindowsCandidates()), nil
+	case "linux":
+		return findLinuxCommand(id, engraverLinuxCandidates()), nil
+	default:
+		return "", nil
+	}
+}
+
+func findWindowsCommand(id string, candidates map[string][]string) string {
+	paths := candidates[id]
+	if len(paths) == 0 {
 		return ""
 	}
 	var bases []string
@@ -290,7 +348,7 @@ func findWindowsCommand(id string) string {
 		bases = append(bases, la, filepath.Join(la, "Programs"))
 	}
 
-	for _, rel := range candidates {
+	for _, rel := range paths {
 		if filepath.IsAbs(rel) && fileExists(rel) {
 			return rel
 		}
@@ -304,9 +362,9 @@ func findWindowsCommand(id string) string {
 	return ""
 }
 
-func findLinuxCommand(id string) string {
-	candidates := linuxCandidates()[id]
-	for _, name := range candidates {
+func findLinuxCommand(id string, candidates map[string][]string) string {
+	paths := candidates[id]
+	for _, name := range paths {
 		if path, err := exec.LookPath(name); err == nil {
 			return path
 		}
@@ -347,6 +405,24 @@ func linuxCandidates() map[string][]string {
 		"lychee":     {"lychee-slicer", "LycheeSlicer"},
 		"photon":     {"photon-workshop", "PhotonWorkshop"},
 		"creality":   {"creality-print", "CrealityPrint"},
+	}
+}
+
+func engraverWindowsCandidates() map[string][]string {
+	return map[string][]string{
+		"lightburn": {"LightBurn\\LightBurn.exe"},
+		"ezcad": {
+			"EZCAD\\EZCAD.exe",
+			"EZCAD2\\EZCAD2.exe",
+			"EZCAD2\\EZCAD.exe",
+		},
+	}
+}
+
+func engraverLinuxCandidates() map[string][]string {
+	return map[string][]string{
+		"lightburn": {"lightburn", "LightBurn"},
+		"ezcad":     {"ezcad", "EZCAD"},
 	}
 }
 

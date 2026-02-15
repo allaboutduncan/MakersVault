@@ -9,5 +9,13 @@
       "command": "/usr/bin/prusa-slicer",
       "args": []
     }
+  },
+  "engravers": {
+    "lightburn": {
+      "command": "C:\\\\Program Files\\\\LightBurn\\\\LightBurn.exe"
+    },
+    "ezcad": {
+      "command": "C:\\\\EZCAD\\\\EZCAD.exe"
+    }
   }
 }

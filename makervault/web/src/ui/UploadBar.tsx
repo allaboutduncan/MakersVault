@@ -181,7 +181,7 @@ export default function UploadBar({ onUploaded, folderId, makerworldCookie, thin
         type="file"
         onChange={onPick}
         multiple
-        accept=".png,.jpg,.jpeg,.webp,.bmp,.svg,.stl,.step,.stp,.3mf,.zip"
+        accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.svg,.stl,.step,.stp,.3mf,.lbrn,.lbrn2,.zip"
         className="hidden"
       />
       <input

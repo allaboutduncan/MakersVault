@@ -39,7 +39,7 @@ func installSelf() (string, error) {
 	}
 	desktopFile := filepath.Join(desktopDir, "makersvault-slicer.desktop")
 	desktop := fmt.Sprintf(
-		"[Desktop Entry]\nName=MakerVault Slicer Bridge\nExec=%s %%u\nType=Application\nTerminal=false\nMimeType=x-scheme-handler/makersvault-slicer;\n",
+		"[Desktop Entry]\nName=MakerVault Bridge\nExec=%s %%u\nType=Application\nTerminal=false\nMimeType=x-scheme-handler/makersvault-slicer;x-scheme-handler/makersvault-engrave;\n",
 		targetPath,
 	)
 	if err := os.WriteFile(desktopFile, []byte(desktop), 0644); err != nil {
@@ -48,6 +48,7 @@ func installSelf() (string, error) {
 
 	if xdgMime, err := exec.LookPath("xdg-mime"); err == nil {
 		_ = exec.Command(xdgMime, "default", "makersvault-slicer.desktop", "x-scheme-handler/makersvault-slicer").Run()
+		_ = exec.Command(xdgMime, "default", "makersvault-slicer.desktop", "x-scheme-handler/makersvault-engrave").Run()
 	}
 
 	return targetPath, nil

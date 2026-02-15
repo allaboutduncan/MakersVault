@@ -9,6 +9,7 @@ type Props = {
   selectedId?: string | null;
   onSelect: (id: string | null) => void;
   onFoldersChanged?: () => void;
+  foldersVersion?: number;
   onUnauthorized?: () => void;
   onOpenSettings?: () => void;
   activeView?: "library" | "settings";
@@ -21,6 +22,7 @@ export default function Sidebar({
   selectedId,
   onSelect,
   onFoldersChanged,
+  foldersVersion,
   onUnauthorized,
   onOpenSettings,
   activeView = "library",
@@ -189,7 +191,7 @@ export default function Sidebar({
       handleError(err, "Unable to load folders.");
     }
   };
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [foldersVersion]);
 
   const startCreate = (parentId: string | null = null) => {
     setCreating(true);
