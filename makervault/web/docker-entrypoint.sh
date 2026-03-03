@@ -51,6 +51,15 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
   adduser -D -H -u "$PUID" -G "$APP_GROUP" "$APP_USER"
 fi
 
-chown -R "$PUID":"$PGID" /app /home/"$APP_USER" 2>/dev/null || true
+CHOWN_MODE=${CHOWN_MODE:-minimal}
+mkdir -p /home/"$APP_USER" /app/node_modules 2>/dev/null || true
+
+# Recursive chown on /app is very expensive with bind mounts and node_modules.
+# Default to a fast top-level ownership fix; allow explicit opt-in when needed.
+if [ "$CHOWN_MODE" = "recursive" ]; then
+  chown -R "$PUID":"$PGID" /app /home/"$APP_USER" 2>/dev/null || true
+else
+  chown "$PUID":"$PGID" /app /app/node_modules /home/"$APP_USER" 2>/dev/null || true
+fi
 
 exec su-exec "$APP_USER" "$@"

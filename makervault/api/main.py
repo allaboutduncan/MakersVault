@@ -374,6 +374,18 @@ def get_thumb(asset_id: str, _: Optional[str] = Depends(require_auth)):
     return FileResponse(p)
 
 
+def apply_asset_filters(stmt, q: Optional[str], tags: Optional[str], folder_id: Optional[str]):
+    if q:
+        qlike = f"%{q}%"
+        stmt = stmt.where((Asset.filename.like(qlike)) | (Asset.title.like(qlike)) | (Asset.notes.like(qlike)))
+    if folder_id:
+        stmt = stmt.where(Asset.folder_id == folder_id)
+    tag_filter = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    for tag in tag_filter:
+        stmt = stmt.where(Asset.tags_json.like(f'%"{tag}"%'))
+    return stmt
+
+
 @app.get("/assets", response_model=List[AssetOut])
 def list_assets(
     response: Response,
@@ -385,15 +397,7 @@ def list_assets(
     _: Optional[str] = Depends(require_auth),
 ):
     with Session(engine) as s:
-        stmt = select(Asset)
-        if q:
-            qlike = f"%{q}%"
-            stmt = stmt.where((Asset.filename.like(qlike)) | (Asset.title.like(qlike)) | (Asset.notes.like(qlike)))
-        if folder_id:
-            stmt = stmt.where(Asset.folder_id == folder_id)
-        tag_filter = [t.strip() for t in (tags or "").split(",") if t.strip()]
-        for tag in tag_filter:
-            stmt = stmt.where(Asset.tags_json.like(f'%"{tag}"%'))
+        stmt = apply_asset_filters(select(Asset), q, tags, folder_id)
         stmt = stmt.order_by(Asset.filename, Asset.id)
         if limit is not None:
             stmt = stmt.limit(limit + 1)
@@ -411,6 +415,34 @@ def list_assets(
 
     out: List[AssetOut] = [to_out(a) for a in assets]
     return out
+
+
+@app.get("/tags", response_model=List[str])
+def list_tags(
+    q: Optional[str] = None,
+    tags: Optional[str] = Query(default=None, description="Comma-separated tags"),
+    folder_id: Optional[str] = None,
+    _: Optional[str] = Depends(require_auth),
+):
+    with Session(engine) as s:
+        stmt = apply_asset_filters(select(Asset.tags_json), q, tags, folder_id)
+        rows = list(s.exec(stmt))
+
+    found: set[str] = set()
+    for raw in rows:
+        try:
+            parsed = json.loads(raw or "[]")
+        except Exception:
+            continue
+        if not isinstance(parsed, list):
+            continue
+        for tag in parsed:
+            if isinstance(tag, str):
+                cleaned = tag.strip()
+                if cleaned:
+                    found.add(cleaned)
+
+    return sorted(found, key=lambda v: v.lower())
 
 
 @app.post("/download/zip")

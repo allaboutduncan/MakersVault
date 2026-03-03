@@ -6,6 +6,7 @@ import {
   deleteAsset,
   fileUrl,
   listAssets,
+  listTags,
   listFolders,
   renameAsset,
   setTags,
@@ -84,6 +85,7 @@ export default function AssetGrid({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [allTags, setAllTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -123,22 +125,39 @@ export default function AssetGrid({
     setLoading(true);
     setHasMore(false);
     setOffset(0);
-    try {
-      const data = await listAssets({
-        q: opts.search ?? q,
-        tags: opts.tags ?? activeTags,
-        folder_id: folderId || undefined,
+    const search = opts.search ?? q;
+    const tags = opts.tags ?? activeTags;
+    const targetFolderId = folderId || undefined;
+    const [assetsResult, tagsResult] = await Promise.allSettled([
+      listAssets({
+        q: search,
+        tags,
+        folder_id: targetFolderId,
         limit: pageSize,
         offset: 0,
-      });
-      setItems(data.items);
-      setOffset(data.items.length);
-      setHasMore(data.hasMore);
-    } catch (err) {
-      handleApiError(err, "Failed to load assets. Please sign in again or refresh.");
-    } finally {
-      setLoading(false);
+      }),
+      listTags({
+        q: search,
+        folder_id: targetFolderId,
+      }),
+    ]);
+
+    if (assetsResult.status === "fulfilled") {
+      setItems(assetsResult.value.items);
+      setOffset(assetsResult.value.items.length);
+      setHasMore(assetsResult.value.hasMore);
+    } else {
+      handleApiError(assetsResult.reason, "Failed to load assets. Please sign in again or refresh.");
     }
+
+    if (tagsResult.status === "fulfilled") {
+      setAllTags(tagsResult.value);
+    } else {
+      setAllTags([]);
+      handleApiError(tagsResult.reason);
+    }
+
+    setLoading(false);
   };
 
   const loadMore = async () => {
@@ -266,12 +285,6 @@ export default function AssetGrid({
   useEffect(() => {
     const present = new Set(items.map(i => i.id));
     setSelectedIds(prev => new Set([...prev].filter(id => present.has(id))));
-  }, [items]);
-
-  const allTags = useMemo(() => {
-    const t = new Set<string>();
-    for (const it of items) for (const tag of it.tags) t.add(tag);
-    return Array.from(t).sort((a,b)=>a.localeCompare(b));
   }, [items]);
 
   const itemById = useMemo(() => {

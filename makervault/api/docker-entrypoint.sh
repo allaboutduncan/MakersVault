@@ -23,6 +23,13 @@ else
 fi
 
 # Make sure mounted data directories are writable by the runtime user.
-chown -R "$PUID":"$PGID" /app/storage /app/data 2>/dev/null || true
+# Recursive chown can be very slow on large libraries, so keep it opt-in.
+CHOWN_MODE=${CHOWN_MODE:-minimal}
+mkdir -p /app/storage /app/data
+if [ "$CHOWN_MODE" = "recursive" ]; then
+  chown -R "$PUID":"$PGID" /app/storage /app/data 2>/dev/null || true
+else
+  chown "$PUID":"$PGID" /app/storage /app/data 2>/dev/null || true
+fi
 
 exec gosu "$APP_USER" "$@"

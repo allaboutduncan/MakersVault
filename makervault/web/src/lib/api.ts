@@ -184,6 +184,22 @@ export async function listAssets(params: {
   return { items, hasMore, nextOffset };
 }
 
+export async function listTags(params: {
+  q?: string;
+  tags?: string[];
+  folder_id?: string;
+} = {}): Promise<string[]> {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set("q", params.q);
+  if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
+  if (params.folder_id) qs.set("folder_id", params.folder_id);
+  const res = await fetch(`${apiBase()}/tags?${qs.toString()}`, {
+    headers: authHeaders(),
+  });
+  assertOk(res, "Failed to list tags");
+  return res.json();
+}
+
 export async function uploadAsset(
   file: File,
   opts: { title?: string; notes?: string; tags?: string[]; folder_id?: string }
