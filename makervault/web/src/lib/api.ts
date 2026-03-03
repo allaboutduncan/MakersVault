@@ -125,31 +125,21 @@ function resolveApiBase(): string {
   const isLocalHost = isLocalHostName(host);
   const isProxyContext = hasWindow && !isLocalHost && isStandardPort;
 
-  // Behind a reverse proxy on 80/443, default to same-origin /api.
-  // This avoids brittle private-IP env defaults breaking public-domain logins.
-  if (isProxyContext && hasWindow) {
-    if (envUrl && isAbs) {
-      try {
-        const absolute = envUrl.startsWith("//") ? `${protocol}${envUrl}` : envUrl;
-        const parsed = new URL(absolute);
-        if (parsed.hostname === host) {
-          return absolute.replace(/\/$/, "");
-        }
-      } catch {
-        // Ignore malformed env URL and keep proxy-safe default below.
-      }
-    }
-    return `${window.location.origin}/api`.replace(/\/$/, "");
-  }
-
   if (envUrl) {
     if (isAbs) {
-      return envUrl.replace(/\/$/, "");
+      const absolute = envUrl.startsWith("//") ? `${protocol}${envUrl}` : envUrl;
+      return absolute.replace(/\/$/, "");
     } else if (!isProxyContext) {
       // If someone sets just a port like ":8000" or "8000"
       const portOnly = envUrl.replace(/^:?/, "");
       return `http://${host}:${portOnly}`.replace(/\/$/, "");
     }
+  }
+
+  // Behind a reverse proxy on 80/443, default to same-origin /api when no
+  // explicit absolute API URL is configured.
+  if (isProxyContext && hasWindow) {
+    return `${window.location.origin}/api`.replace(/\/$/, "");
   }
 
   // Default: same host, API on 8000
