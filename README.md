@@ -2,7 +2,7 @@
 <img width="612" height="408" alt="makersvaultlogoneon-removebg-preview" src="https://github.com/user-attachments/assets/32e7faae-23e3-41bb-a188-376ad2fa68df" />
 
 ![Status](https://img.shields.io/badge/status-Beta%20release-brightgreen)
-![Version](https://img.shields.io/badge/version-5.0-blue)
+![Version](https://img.shields.io/badge/version-5.1.2-blue)
 ![Docker Pulls](https://img.shields.io/docker/pulls/shotgunwilly555/makersvault-web)
 ![License](https://img.shields.io/github/license/VincentCinque/MakersVault)
 
