@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
 from typing import List, Optional
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import HTTPException
 from PIL import Image
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from config import IMPORT_MAX_BYTES
 from db import STORAGE, THUMBS, engine
@@ -33,6 +34,77 @@ def save_thumb(asset_id: str, src: Path) -> Optional[str]:
         return f"/thumb/{asset_id}.jpg"
     except Exception:
         return None
+
+
+# Embedded thumbnails Bambu Studio / PrusaSlicer / OrcaSlicer write into the
+# 3MF zip, in priority order. plate_1 is the first plate of a Bambu project.
+_THREEMF_THUMB_CANDIDATES = (
+    "Metadata/plate_1.png",
+    "Metadata/plate.png",
+    "Metadata/thumbnail.png",
+    "Metadata/thumbnail_middle.png",
+    "Metadata/thumbnail_small.png",
+)
+
+
+def extract_3mf_thumbnail(asset_id: str, src: Path) -> Optional[str]:
+    try:
+        with ZipFile(src) as zf:
+            names = zf.namelist()
+            name_set = set(names)
+            chosen = next((c for c in _THREEMF_THUMB_CANDIDATES if c in name_set), None)
+            if chosen is None:
+                plates = sorted(
+                    n for n in names
+                    if n.lower().startswith("metadata/plate_") and n.lower().endswith(".png")
+                )
+                chosen = plates[0] if plates else None
+            if chosen is None:
+                return None
+            thumb = THUMBS / f"{asset_id}.jpg"
+            with zf.open(chosen) as fh, Image.open(fh) as im:
+                im = im.convert("RGB")
+                im.thumbnail((512, 512))
+                im.save(thumb, quality=88)
+        return f"/thumb/{asset_id}.jpg"
+    except (BadZipFile, KeyError, OSError, ValueError):
+        return None
+    except Exception:
+        return None
+
+
+def generate_thumbnail(asset_id: str, src: Path, mime: Optional[str]) -> Optional[str]:
+    """Pick the right thumbnail strategy based on file type."""
+    suffix = src.suffix.lower()
+    if (mime or "").lower().startswith("image/") and suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        return save_thumb(asset_id, src)
+    if suffix == ".3mf":
+        return extract_3mf_thumbnail(asset_id, src)
+    return None
+
+
+def backfill_3mf_thumbnails() -> int:
+    """One-shot pass to populate thumbnails for existing 3MF assets that lack one."""
+    count = 0
+    try:
+        with Session(engine) as s:
+            rows = list(s.exec(select(Asset).where(Asset.filename.like("%.3mf"))))
+    except Exception:
+        return 0
+    for a in rows:
+        try:
+            if (THUMBS / f"{a.id}.jpg").exists():
+                continue
+            src = STORAGE / a.id / a.filename
+            if not src.exists() and a.source_path:
+                src = Path(a.source_path)
+            if not src.exists():
+                continue
+            if extract_3mf_thumbnail(a.id, src):
+                count += 1
+        except Exception:
+            continue
+    return count
 
 
 def create_asset_record(
@@ -121,8 +193,7 @@ def persist_asset_from_response(resp, final_url: str, body: ImportRequest) -> As
     dest = asset_path(asset.id, asset.filename)
     try:
         size = stream_response_to_file(resp, dest)
-        if (mime or "").startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-            save_thumb(asset.id, dest)
+        generate_thumbnail(asset.id, dest, mime)
         refreshed = finalize_asset_record(asset.id, size, mime)
         return refreshed or asset
     except HTTPException:

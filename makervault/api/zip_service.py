@@ -6,7 +6,7 @@ from zipfile import ZipFile
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from asset_service import asset_path, cleanup_asset, create_asset_record, finalize_asset_record, save_thumb
+from asset_service import asset_path, cleanup_asset, create_asset_record, finalize_asset_record, generate_thumbnail
 from config import IMPORT_MAX_BYTES
 from db import engine
 from file_utils import mime_from_content_type, sanitize_filename
@@ -120,8 +120,7 @@ def extract_zip_entries_to_assets(zip_path: Path, selections: List[str], body: I
                         if size > IMPORT_MAX_BYTES:
                             raise ValueError("Extracted file exceeds size limit")
                         out.write(chunk)
-                if (mime or "").startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-                    save_thumb(asset.id, dest)
+                generate_thumbnail(asset.id, dest, mime)
                 refreshed = finalize_asset_record(asset.id, size, mime)
                 assets.append(refreshed or asset)
             except Exception:

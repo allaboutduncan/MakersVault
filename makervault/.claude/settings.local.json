@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile api/asset_service.py api/main.py api/zip_service.py api/mount_import.py)",
+      "Bash(docker --version)",
+      "Bash(docker buildx:*)",
+      "Bash(docker info:*)",
+      "Bash(docker image ls:*)",
+      "Bash(python -c \"p='docker-entrypoint.sh'; open\\(p,'wb'\\).write\\(open\\(p,'rb'\\).read\\(\\).replace\\(b'\\\\r\\\\n',b'\\\\n'\\)\\)\")",
+      "Bash(python -c \"d=open\\('docker-entrypoint.sh','rb'\\).read\\(\\); print\\(len\\(d\\), repr\\(d[:30]\\)\\)\")",
+      "Bash(docker run:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run:*)",
+      "Bash(docker tag:*)"
+    ]
+  }
+}

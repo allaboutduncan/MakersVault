@@ -1,0 +1,8 @@
+# Force LF line endings for shell scripts and other Linux runtime files,
+# even when the repo is checked out on Windows with core.autocrlf=true.
+# Without this, docker-entrypoint.sh ends up with CRLF and the Linux kernel
+# reads the shebang as "/bin/sh\r" — causing "no such file or directory"
+# at container start.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.dockerfile text eol=lf

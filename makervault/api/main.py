@@ -23,7 +23,7 @@ from auth import (
     create_token,
     require_auth,
 )
-from asset_service import asset_path, save_thumb
+from asset_service import asset_path, backfill_3mf_thumbnails, generate_thumbnail
 from config import MOUNT_IMPORT_ENABLED, MOUNT_IMPORT_PATH, MOUNT_IMPORT_COPY
 from db import STORAGE, THUMBS, engine, ensure_folder_parent_column, ensure_asset_source_path_column, ensure_asset_indexes
 from file_utils import build_import_filename, mime_from_content_type, sanitize_filename
@@ -109,6 +109,17 @@ def on_startup():
     ensure_folder_parent_column()
     ensure_asset_source_path_column()
     ensure_asset_indexes()
+
+    def _run_3mf_backfill():
+        try:
+            n = backfill_3mf_thumbnails()
+            if n:
+                print(f"[3mf-thumbs] Backfilled {n} thumbnail(s) from existing 3MF assets.")
+        except Exception as exc:
+            print(f"[3mf-thumbs] Backfill failed: {exc}")
+
+    threading.Thread(target=_run_3mf_backfill, daemon=True).start()
+
     if MOUNT_IMPORT_PATH and get_mount_import_enabled(MOUNT_IMPORT_ENABLED):
         threading.Thread(target=scan_mount_imports, daemon=True).start()
 
@@ -276,9 +287,8 @@ async def upload(
             f.write(chunk)
     size = dest.stat().st_size
 
-    # make a thumbnail for common image formats
-    if (asset.mime or "").lower().startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-        save_thumb(asset.id, dest)
+    # make a thumbnail (images get a PIL resize, 3MF gets the embedded slicer preview)
+    generate_thumbnail(asset.id, dest, asset.mime)
 
     # update size
     with Session(engine) as s:
